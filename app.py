@@ -98,52 +98,115 @@ def nice_name(path: Path) -> str:
 
 def find_shapefiles(folder: Path):
     """
-    Busca todos los SHP dentro de una carpeta y subcarpetas.
+    Busca TODOS los shapefiles dentro de folder y subcarpetas.
 
-    Excluye únicamente:
+    Excluye:
       - hybas_lake_sa_level01_v1c.shp ... level12
       - Hydro_RIVERS_v10.shp
 
-    Todo lo demás se considera.
+    Se aceptan .shp, .SHP, .Shp, etc.
     """
-    if not folder.exists():
+    if not folder.exists() or not folder.is_dir():
         return []
 
     shapefiles = []
 
-    # Acepta .shp en cualquier combinación de mayúsculas/minúsculas.
     for shp in folder.rglob("*"):
-        if not shp.is_file() or shp.suffix.lower() != ".shp":
+        if not shp.is_file():
+            continue
+
+        if shp.suffix.lower() != ".shp":
             continue
 
         stem = shp.stem.lower()
 
-        # Excluir HYBAS Level 01-12
-        if stem.startswith("hybas_lake_sa_level") and stem.endswith("_v1c"):
-            level_text = stem.replace(
-                "hybas_lake_sa_level", ""
-            ).replace("_v1c", "")
+        # HYBAS Level 01-12
+        if (
+            stem.startswith("hybas_lake_sa_level")
+            and stem.endswith("_v1c")
+        ):
+            level_text = (
+                stem.replace("hybas_lake_sa_level", "")
+                .replace("_v1c", "")
+            )
 
             if level_text.isdigit():
                 level = int(level_text)
                 if 1 <= level <= 12:
                     continue
 
-        # Excluir solamente este río
+        # Excluir únicamente Hydro_RIVERS_v10
         if stem == "hydro_rivers_v10":
             continue
 
         shapefiles.append(shp)
 
-    return sorted(shapefiles, key=lambda p: p.name.lower())
+    return sorted(
+        shapefiles,
+        key=lambda p: str(p).lower()
+    )
 
 
-@st.cache_data(show_spinner=False)
 def discover_files():
-    return {
-        key: find_shapefiles(cfg["folder"])
-        for key, cfg in GROUPS.items()
-    }
+    """
+    Descubre los shapefiles en cada grupo sin utilizar caché.
+
+    Para ríos:
+      1) busca en data/rio/
+      2) busca en data/rios/
+      3) si no encuentra nada, busca south_america_LOR.shp
+         dentro de data/ como respaldo.
+
+    Esto evita que el dashboard quede con una lista vacía
+    cuando los archivos fueron subidos recientemente a GitHub.
+    """
+    result = {}
+
+    # Cuencas
+    result["cuenca"] = find_shapefiles(
+        DATA_DIR / "cuenca"
+    )
+
+    # Estaciones
+    result["estaciones"] = find_shapefiles(
+        DATA_DIR / "estaciones"
+    )
+
+    # --------------------------------------------------------
+    # RÍOS: buscar en ambas posibles carpetas
+    # --------------------------------------------------------
+    river_candidates = []
+
+    for folder_name in ["rio", "rios"]:
+        folder = DATA_DIR / folder_name
+
+        for shp in find_shapefiles(folder):
+            if shp not in river_candidates:
+                river_candidates.append(shp)
+
+    # --------------------------------------------------------
+    # RESPALDO:
+    # si no aparece en rio/rios, localizar específicamente
+    # south_america_LOR.shp dentro de data/.
+    # --------------------------------------------------------
+    if not river_candidates and DATA_DIR.exists():
+
+        for shp in DATA_DIR.rglob("*"):
+            if not shp.is_file():
+                continue
+
+            if shp.suffix.lower() != ".shp":
+                continue
+
+            if shp.stem.lower() == "south_america_lor":
+                river_candidates.append(shp)
+
+    result["rio"] = sorted(
+        river_candidates,
+        key=lambda p: str(p).lower()
+    )
+
+    return result
 
 
 @st.cache_data(show_spinner=True, ttl=3600)
@@ -716,7 +779,7 @@ with st.sidebar:
             )
 
             selected[layer_id] = st.checkbox(
-                nice_name(path),
+                ("Ríos principales" if path.stem.lower() == "south_america_lor" else nice_name(path)),
                 value=True,
                 key=(
                     "check_"
@@ -727,11 +790,9 @@ with st.sidebar:
             )
 
     else:
-        st.warning(
-            f"No hay SHP de ríos disponibles en "
-            f"{GROUPS['rio']['folder'].relative_to(BASE_DIR)} "
-            "después de excluir Hydro_RIVERS_v10.shp."
-        )
+        # No mostrar mensajes de error al usuario.
+        # Si no hay archivos, simplemente no se agrega la sección.
+        pass
 
     # --------------------------------------------------------
     # ESTACIONES
