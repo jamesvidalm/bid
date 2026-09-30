@@ -507,12 +507,12 @@ def add_river_layer(m, gdf, layer_name):
         name=layer_name,
         style_function=lambda feature: {
             "color": "#0057B8",
-            "weight": 2.2,
+            "weight": 0.5,
             "opacity": 1.0,
         },
         highlight_function=lambda feature: {
             "color": "#003B7A",
-            "weight": 3.5,
+            "weight": 0.8,
             "opacity": 1.0,
         },
         tooltip=tooltip,
