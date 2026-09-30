@@ -26,6 +26,14 @@ DATA_DIR = BASE_DIR / "data"
 # ============================================================
 # CARPETAS QUE SE UTILIZAN
 # ============================================================
+# En GitHub la carpeta puede llamarse "rio" o "rios".
+# Se detecta automáticamente cuál existe.
+RIVER_DIR = (
+    DATA_DIR / "rio"
+    if (DATA_DIR / "rio").exists()
+    else DATA_DIR / "rios"
+)
+
 GROUPS = {
     "cuenca": {
         "label": "Cuencas analizadas",
@@ -34,7 +42,7 @@ GROUPS = {
     },
     "rio": {
         "label": "Ríos",
-        "folder": DATA_DIR / "rio",
+        "folder": RIVER_DIR,
         "geometry": "line",
     },
     "estaciones": {
@@ -103,7 +111,11 @@ def find_shapefiles(folder: Path):
 
     shapefiles = []
 
-    for shp in folder.rglob("*.shp"):
+    # Acepta .shp en cualquier combinación de mayúsculas/minúsculas.
+    for shp in folder.rglob("*"):
+        if not shp.is_file() or shp.suffix.lower() != ".shp":
+            continue
+
         stem = shp.stem.lower()
 
         # Excluir HYBAS Level 01-12
@@ -381,8 +393,12 @@ def add_basin_layers(m, gdf, layer_name, color_index):
 
 def add_river_layer(m, gdf, layer_name):
     """
-    Agrega los ríos que existan en data/rio,
-    excepto Hydro_RIVERS_v10.shp.
+    Agrega la capa de ríos.
+    Se dibuja como línea y se coloca después de las cuencas para
+    que quede visible sobre ellas.
+
+    Si el archivo contiene MultiLineString, LineString o GeometryCollection,
+    Folium/GeoJSON lo representa correctamente.
     """
     fg = FeatureGroup(name=layer_name, show=True)
 
@@ -394,39 +410,39 @@ def add_river_layer(m, gdf, layer_name):
             "RIVER",
             "RIVER_NAME",
             "NOMBRE_RIO",
+            "RIVERNAME",
             "ID",
             "CODE",
         ],
     )
 
-    tooltip_fields = []
-    aliases = []
+    # El GeoDataFrame completo se mantiene; no se filtran geometrías
+    # porque algunos archivos pueden contener GeometryCollection.
+    river_geojson = gdf.to_json()
 
+    tooltip = None
     if name_field:
-        tooltip_fields = [name_field]
-        aliases = ["Río:"]
+        tooltip = folium.GeoJsonTooltip(
+            fields=[name_field],
+            aliases=["Río:"],
+            sticky=False,
+            labels=True,
+        )
 
     folium.GeoJson(
-        gdf.to_json(),
+        river_geojson,
+        name=layer_name,
         style_function=lambda feature: {
-            "color": RIVER_COLOR,
-            "weight": 2.5,
-            "opacity": 0.90,
+            "color": "#0057B8",
+            "weight": 3.0,
+            "opacity": 1.0,
         },
         highlight_function=lambda feature: {
-            "color": "#0B4F71",
-            "weight": 4,
-            "opacity": 1,
+            "color": "#003B7A",
+            "weight": 5.0,
+            "opacity": 1.0,
         },
-        tooltip=(
-            folium.GeoJsonTooltip(
-                fields=tooltip_fields,
-                aliases=aliases,
-                sticky=False,
-            )
-            if tooltip_fields
-            else None
-        ),
+        tooltip=tooltip,
     ).add_to(fg)
 
     fg.add_to(m)
@@ -712,7 +728,8 @@ with st.sidebar:
 
     else:
         st.warning(
-            "No hay SHP de ríos disponibles en data/rio "
+            f"No hay SHP de ríos disponibles en "
+            f"{GROUPS['rio']['folder'].relative_to(BASE_DIR)} "
             "después de excluir Hydro_RIVERS_v10.shp."
         )
 
