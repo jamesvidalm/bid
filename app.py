@@ -729,6 +729,365 @@ def station_group_color(index, filename):
     return STATION_GROUP_COLORS[index % len(STATION_GROUP_COLORS)]
 
 
+
+# ============================================================
+# RESUMEN DE ESTACIONES POR PAÍS
+# ============================================================
+
+COUNTRIES = ["Perú", "Bolivia", "Ecuador"]
+
+
+def normalize_country(value):
+    """Normaliza nombres de país a Perú, Bolivia o Ecuador."""
+    if value is None or pd.isna(value):
+        return None
+
+    s = str(value).strip().lower()
+
+    replacements = {
+        "peru": "Perú",
+        "perú": "Perú",
+        "pe": "Perú",
+        "per": "Perú",
+        "bolivia": "Bolivia",
+        "bo": "Bolivia",
+        "ecuador": "Ecuador",
+        "ec": "Ecuador",
+    }
+
+    return replacements.get(s)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def load_country_boundaries():
+    """
+    Carga límites nacionales de Perú, Bolivia y Ecuador.
+    Se usa únicamente para determinar geográficamente el país
+    donde está cada estación.
+
+    Fuente pública: dataset GeoJSON de países.
+    """
+    url = (
+        "https://raw.githubusercontent.com/"
+        "datasets/geo-countries/master/data/countries.geojson"
+    )
+
+    try:
+        countries = gpd.read_file(url)
+
+        if countries.empty:
+            return None
+
+        if countries.crs is not None:
+            countries = countries.to_crs(epsg=4326)
+
+        country_field = find_field(
+            countries,
+            ["ADMIN", "NAME", "name", "COUNTRY", "Country", "SOVEREIGNT"]
+        )
+
+        if country_field is None:
+            return None
+
+        countries["pais_resumen"] = countries[country_field].apply(
+            normalize_country
+        )
+
+        countries = countries[
+            countries["pais_resumen"].isin(COUNTRIES)
+        ].copy()
+
+        if countries.empty:
+            return None
+
+        return countries[["pais_resumen", "geometry"]]
+
+    except Exception:
+        return None
+
+
+def get_country_field(gdf):
+    """Busca un campo de país si el propio shapefile de estaciones lo contiene."""
+    return find_field(
+        gdf,
+        [
+            "PAIS",
+            "PAÍS",
+            "PAIS_NAME",
+            "COUNTRY",
+            "COUNTRY_NAME",
+            "NACION",
+            "NATIONALITY",
+        ],
+    )
+
+
+def assign_station_countries(gdf):
+    """
+    Asigna Perú, Bolivia o Ecuador a cada punto.
+
+    Prioridad:
+      1. Campo PAIS/COUNTRY del shapefile, si existe.
+      2. Ubicación espacial contra límites nacionales.
+    """
+    result = gdf.copy()
+
+    country_field = get_country_field(result)
+
+    if country_field is not None:
+        result["pais_resumen"] = result[country_field].apply(
+            normalize_country
+        )
+
+        # Si todas las filas pudieron ser clasificadas, terminamos.
+        if result["pais_resumen"].notna().all():
+            return result
+
+    # Clasificación espacial para los puntos que no tengan país.
+    countries = load_country_boundaries()
+
+    if countries is not None and not result.empty:
+        try:
+            points = result.copy()
+
+            if points.crs is None:
+                points = points.set_crs(epsg=4326)
+            else:
+                points = points.to_crs(epsg=4326)
+
+            # Garantizar geometrías puntuales.
+            points = points[
+                points.geometry.geom_type.isin(["Point", "MultiPoint"])
+            ].copy()
+
+            if not points.empty:
+                joined = gpd.sjoin(
+                    points.drop(columns=["pais_resumen"], errors="ignore"),
+                    countries,
+                    how="left",
+                    predicate="within",
+                )
+
+                # Mantener el índice original.
+                country_values = joined["pais_resumen"]
+
+                for idx, country in country_values.items():
+                    if idx in result.index and pd.notna(country):
+                        result.loc[idx, "pais_resumen"] = country
+
+        except Exception:
+            pass
+
+    if "pais_resumen" not in result.columns:
+        result["pais_resumen"] = None
+
+    return result
+
+
+def station_type_from_filename(path):
+    """
+    Determina si un archivo corresponde a Amaru, BID o Altimetría.
+    """
+    low = path.stem.lower()
+
+    if "amaru" in low:
+        return "Amaru"
+
+    if "altimetr" in low:
+        return "Altimetría"
+
+    if "bid" in low:
+        return "BID"
+
+    return None
+
+
+def build_station_summary(station_files):
+    """
+    Construye el resumen por país y tipo de estación.
+    Cada registro representa una geometría puntual del shapefile.
+    """
+    rows = []
+
+    for path in station_files:
+        station_type = station_type_from_filename(path)
+
+        # Solo se consideran los tres grupos solicitados.
+        if station_type is None:
+            continue
+
+        try:
+            gdf = load_layer(str(path))
+
+            if gdf.empty:
+                continue
+
+            gdf = assign_station_countries(gdf)
+
+            for _, row in gdf.iterrows():
+                geom = row.geometry
+
+                if geom is None or geom.is_empty:
+                    continue
+
+                if geom.geom_type == "Point":
+                    rows.append(
+                        {
+                            "Pais": row.get("pais_resumen"),
+                            "Tipo": station_type,
+                        }
+                    )
+
+                elif geom.geom_type == "MultiPoint":
+                    for _ in geom.geoms:
+                        rows.append(
+                            {
+                                "Pais": row.get("pais_resumen"),
+                                "Tipo": station_type,
+                            }
+                        )
+
+        except Exception:
+            continue
+
+    # Tabla completa, garantizando siempre los tres países y tres tipos.
+    base = pd.MultiIndex.from_product(
+        [COUNTRIES, ["Amaru", "BID", "Altimetría"]],
+        names=["Pais", "Tipo"],
+    ).to_frame(index=False)
+
+    if rows:
+        data = pd.DataFrame(rows)
+
+        data["Pais"] = data["Pais"].apply(normalize_country)
+
+        data = data[
+            data["Pais"].isin(COUNTRIES)
+            & data["Tipo"].isin(["Amaru", "BID", "Altimetría"])
+        ]
+
+        counts = (
+            data.groupby(["Pais", "Tipo"])
+            .size()
+            .reset_index(name="Cantidad")
+        )
+
+        base = base.merge(
+            counts,
+            on=["Pais", "Tipo"],
+            how="left",
+        )
+    else:
+        base["Cantidad"] = 0
+
+    base["Cantidad"] = base["Cantidad"].fillna(0).astype(int)
+
+    summary = (
+        base.pivot(
+            index="Pais",
+            columns="Tipo",
+            values="Cantidad",
+        )
+        .reindex(COUNTRIES)
+        .fillna(0)
+        .astype(int)
+        .reset_index()
+    )
+
+    for col in ["Amaru", "BID", "Altimetría"]:
+        if col not in summary.columns:
+            summary[col] = 0
+
+    summary["Total"] = (
+        summary["Amaru"]
+        + summary["BID"]
+        + summary["Altimetría"]
+    )
+
+    return summary[
+        ["Pais", "Amaru", "BID", "Altimetría", "Total"]
+    ]
+
+
+def show_station_summary(station_files):
+    """
+    Muestra:
+      1. Tabla resumen de los tres países.
+      2. Selector de país.
+      3. Tabla detallada del país seleccionado.
+    """
+    summary = build_station_summary(station_files)
+
+    st.markdown("## Resumen de estaciones")
+
+    st.caption(
+        "Cantidad de estaciones por país y grupo, según la ubicación "
+        "geográfica de cada punto."
+    )
+
+    # Tabla 1: todos los países
+    table_all = summary.rename(
+        columns={
+            "Pais": "País",
+            "Amaru": "Amaru",
+            "BID": "BID",
+            "Altimetría": "Altimetría",
+            "Total": "Total",
+        }
+    )
+
+    st.dataframe(
+        table_all,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Tabla 2: país seleccionado
+    selected_country = st.selectbox(
+        "Selecciona un país para ver el detalle",
+        COUNTRIES,
+        index=0,
+        key="station_country_selector",
+    )
+
+    selected_row = summary[
+        summary["Pais"] == selected_country
+    ].copy()
+
+    if not selected_row.empty:
+        detail = pd.DataFrame(
+            {
+                "Tipo de estación": [
+                    "Amaru",
+                    "BID",
+                    "Altimetría",
+                ],
+                "Cantidad": [
+                    int(selected_row.iloc[0]["Amaru"]),
+                    int(selected_row.iloc[0]["BID"]),
+                    int(selected_row.iloc[0]["Altimetría"]),
+                ],
+            }
+        )
+
+        total = int(selected_row.iloc[0]["Total"])
+
+        st.markdown(
+            f"### Estaciones en {selected_country}"
+        )
+
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.metric(
+            "Total de estaciones",
+            total,
+        )
+
+
 def calculate_center(gdfs):
     bounds = []
 
@@ -1036,6 +1395,12 @@ if selected.get("estacion_cierre__puerto_alegria", False):
 center, zoom = calculate_center(
     selected_gdfs
 )
+
+
+# ============================================================
+# RESUMEN DE ESTACIONES
+# ============================================================
+show_station_summary(files["estaciones"])
 
 
 # ============================================================
