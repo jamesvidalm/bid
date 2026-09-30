@@ -1010,29 +1010,16 @@ def build_station_summary(station_files):
 
 
 def build_station_list(station_files, selected_country):
-    """
-    Construye la lista de estaciones pertenecientes al país seleccionado.
-
-    Para cada estación se conserva:
-      - Tipo: Amaru, BID o Altimetría
-      - Nombre de la estación
-      - Archivo/grupo de origen (como referencia)
-
-    El país se determina con la misma lógica utilizada en el resumen:
-      1) campo de país del shapefile, si existe;
-      2) ubicación geográfica del punto contra los límites nacionales.
-    """
+    """Construye la lista nominal de estaciones del país seleccionado."""
     rows = []
 
     for path in station_files:
         station_type = station_type_from_filename(path)
-
         if station_type is None:
             continue
 
         try:
             gdf = load_layer(str(path))
-
             if gdf.empty:
                 continue
 
@@ -1041,12 +1028,10 @@ def build_station_list(station_files, selected_country):
 
             for idx, row in gdf.iterrows():
                 country = row.get("pais_resumen")
-
                 if normalize_country(country) != selected_country:
                     continue
 
                 geom = row.geometry
-
                 if geom is None or geom.is_empty:
                     continue
 
@@ -1059,89 +1044,54 @@ def build_station_list(station_files, selected_country):
                 else:
                     station_name = f"Punto {idx + 1}"
 
-                # Point = una estación.
                 if geom.geom_type == "Point":
-                    rows.append(
-                        {
-                            "Tipo de estación": station_type,
-                            "Nombre de estación": station_name,
-                            "Grupo / archivo": nice_name(path),
-                        }
-                    )
-
-                # MultiPoint = una fila por punto. Si el atributo de nombre
-                # es común al registro, se conserva el nombre original.
+                    rows.append({
+                        "Tipo de estación": station_type,
+                        "Nombre de estación": station_name,
+                    })
                 elif geom.geom_type == "MultiPoint":
                     for point_idx, _ in enumerate(geom.geoms, start=1):
                         name_for_point = station_name
                         if station_name.startswith("Punto ") and len(geom.geoms) > 1:
                             name_for_point = f"{station_name} - {point_idx}"
-
-                        rows.append(
-                            {
-                                "Tipo de estación": station_type,
-                                "Nombre de estación": name_for_point,
-                                "Grupo / archivo": nice_name(path),
-                            }
-                        )
-
+                        rows.append({
+                            "Tipo de estación": station_type,
+                            "Nombre de estación": name_for_point,
+                        })
         except Exception:
             continue
 
     if not rows:
-        return pd.DataFrame(
-            columns=[
-                "Tipo de estación",
-                "Nombre de estación",
-                "Grupo / archivo",
-            ]
-        )
+        return pd.DataFrame(columns=["Tipo de estación", "Nombre de estación"])
 
     result = pd.DataFrame(rows)
-
-    # Evitar duplicados cuando una misma estación aparece en más de un
-    # shapefile o en archivos repetidos.
     result = result.drop_duplicates(
         subset=["Tipo de estación", "Nombre de estación"],
         keep="first",
     )
 
-    type_order = pd.CategoricalDtype(
+    order = pd.CategoricalDtype(
         categories=["Amaru", "BID", "Altimetría"],
         ordered=True,
     )
-    result["Tipo de estación"] = result["Tipo de estación"].astype(type_order)
-
-    result = result.sort_values(
+    result["Tipo de estación"] = result["Tipo de estación"].astype(order)
+    return result.sort_values(
         by=["Tipo de estación", "Nombre de estación"],
         kind="stable",
     ).reset_index(drop=True)
 
-    return result
-
 
 def show_station_summary(station_files):
-    """
-    Muestra dos tablas limpias y profesionales:
-      1. Resumen general de Perú, Bolivia y Ecuador.
-      2. Resumen del país seleccionado.
-
-    Se utiliza Pandas Styler para evitar que el HTML aparezca
-    como texto en Streamlit.
-    """
+    """Muestra el resumen de estaciones y el detalle nominal del país seleccionado."""
 
     summary = build_station_summary(station_files)
 
     st.markdown("## Resumen de estaciones")
-
     st.caption(
         "Cantidad de estaciones por país y grupo, según la ubicación geográfica de cada punto."
     )
 
-    # ========================================================
-    # ESTILO DE TABLAS
-    # ========================================================
-    HEADER_BLUE = "#5B8EAD"       # Azul medio
+    HEADER_BLUE = "#5B8EAD"
     HEADER_BLUE_DARK = "#4D7F9C"
     BORDER = "#D9E4EC"
     TEXT = "#334155"
@@ -1149,17 +1099,21 @@ def show_station_summary(station_files):
     HOVER_BLUE = "#EAF2F7"
     TOTAL_BLUE = "#E5F0F6"
 
-    def style_table(df, first_column_left=True, total_row=False):
+    def style_table(df, first_column_left=True, total_row=False, compact=False):
+        font_size = "12px" if compact else "13px"
+        cell_padding = "6px 9px" if compact else "8px 12px"
+        header_padding = "7px 9px" if compact else "9px 12px"
+
         styler = (
             df.style
             .set_properties(
                 **{
                     "font-family": "Arial, sans-serif",
-                    "font-size": "13px",
+                    "font-size": font_size,
                     "color": TEXT,
                     "text-align": "center",
                     "border": f"1px solid {BORDER}",
-                    "padding": "8px 12px",
+                    "padding": cell_padding,
                 }
             )
             .set_table_styles(
@@ -1173,7 +1127,7 @@ def show_station_summary(station_files):
                             ("overflow", "hidden"),
                             ("background-color", "white"),
                             ("box-shadow", "0 1px 4px rgba(18,52,77,0.08)"),
-                            ("margin-bottom", "18px"),
+                            ("margin-bottom", "14px"),
                         ],
                     },
                     {
@@ -1184,20 +1138,16 @@ def show_station_summary(station_files):
                             ("font-weight", "700"),
                             ("text-align", "center"),
                             ("border", f"1px solid {HEADER_BLUE_DARK}"),
-                            ("padding", "9px 12px"),
+                            ("padding", header_padding),
                         ],
                     },
                     {
                         "selector": "tbody tr:nth-child(even) td",
-                        "props": [
-                            ("background-color", LIGHT_BLUE),
-                        ],
+                        "props": [("background-color", LIGHT_BLUE)],
                     },
                     {
                         "selector": "tbody tr:hover td",
-                        "props": [
-                            ("background-color", HOVER_BLUE),
-                        ],
+                        "props": [("background-color", HOVER_BLUE)],
                     },
                 ]
             )
@@ -1245,7 +1195,6 @@ def show_station_summary(station_files):
         }
     ).copy()
 
-    # Asegurar enteros.
     for col in ["Amaru", "BID", "Altimetría", "Total"]:
         table_general[col] = table_general[col].astype(int)
 
@@ -1254,6 +1203,7 @@ def show_station_summary(station_files):
             table_general,
             first_column_left=True,
             total_row=False,
+            compact=True,
         )
     )
 
@@ -1267,10 +1217,7 @@ def show_station_summary(station_files):
         key="station_country_selector",
     )
 
-    selected_row = summary[
-        summary["Pais"] == selected_country
-    ].copy()
-
+    selected_row = summary[summary["Pais"] == selected_country].copy()
     if selected_row.empty:
         return
 
@@ -1286,12 +1233,7 @@ def show_station_summary(station_files):
 
     detail = pd.DataFrame(
         {
-            "Tipo de estación": [
-                "Amaru",
-                "BID",
-                "Altimetría",
-                "Total",
-            ],
+            "Tipo de estación": ["Amaru", "BID", "Altimetría", "Total"],
             "Cantidad": [
                 int(row["Amaru"]),
                 int(row["BID"]),
@@ -1306,11 +1248,12 @@ def show_station_summary(station_files):
             detail,
             first_column_left=True,
             total_row=True,
+            compact=True,
         )
     )
 
     # ========================================================
-    # LISTA DE ESTACIONES DEL PAÍS SELECCIONADO
+    # LISTA NOMINAL EN 3 COLUMNAS
     # ========================================================
     st.markdown(
         f'<div class="summary-table-title">Estaciones de {html.escape(selected_country)}</div>',
@@ -1318,45 +1261,46 @@ def show_station_summary(station_files):
     )
 
     st.caption(
-        "Listado nominal de las estaciones clasificadas por grupo según su ubicación geográfica."
+        "Las estaciones se muestran separadas por grupo para facilitar su identificación."
     )
 
-    station_list = build_station_list(
-        station_files,
-        selected_country,
-    )
+    station_list = build_station_list(station_files, selected_country)
 
     if station_list.empty:
-        st.info(
-            f"No se encontraron nombres de estaciones para {selected_country}."
-        )
+        st.info(f"No se encontraron nombres de estaciones para {selected_country}.")
         return
 
-    # Mostrar el grupo y el nombre. Se elimina la columna técnica del archivo
-    # de origen para que el usuario vea principalmente qué estaciones existen.
-    station_list_display = station_list[
-        ["Tipo de estación", "Nombre de estación"]
-    ].copy()
+    station_groups = {}
+    for station_type in ["Amaru", "BID", "Altimetría"]:
+        station_groups[station_type] = station_list[
+            station_list["Tipo de estación"].astype(str) == station_type
+        ]["Nombre de estación"].drop_duplicates().tolist()
 
-    # Convertir la categoría a texto para una representación limpia.
-    station_list_display["Tipo de estación"] = station_list_display[
-        "Tipo de estación"
-    ].astype(str)
+    columns = st.columns(3, gap="medium")
 
-    # Numeración para facilitar la lectura.
-    station_list_display.insert(
-        0,
-        "N°",
-        range(1, len(station_list_display) + 1),
-    )
+    for col, station_type in zip(columns, ["Amaru", "BID", "Altimetría"]):
+        names = station_groups[station_type]
 
-    st.table(
-        style_table(
-            station_list_display,
-            first_column_left=False,
-            total_row=False,
-        )
-    )
+        with col:
+            st.markdown(
+                f'''<div style="background:#5B8EAD;color:white;font-family:Arial,sans-serif;font-size:14px;font-weight:700;padding:8px 10px;border-radius:7px 7px 0 0;border:1px solid #4D7F9C;text-align:center;margin-top:4px;">{html.escape(station_type)} <span style="font-weight:400;">({len(names)})</span></div>''',
+                unsafe_allow_html=True,
+            )
+
+            if names:
+                rows_html = []
+                for idx, name in enumerate(names, start=1):
+                    safe_name = html.escape(str(name))
+                    bg = "#F4F8FB" if idx % 2 == 0 else "#FFFFFF"
+                    rows_html.append(
+                        f'''<div style="display:flex;align-items:flex-start;gap:7px;padding:6px 8px;border-left:1px solid #D9E4EC;border-right:1px solid #D9E4EC;border-bottom:1px solid #D9E4EC;background:{bg};font-family:Arial,sans-serif;font-size:12px;line-height:1.25;color:#334155;"><span style="min-width:22px;color:#5B8EAD;font-weight:700;">{idx}.</span><span style="word-break:break-word;">{safe_name}</span></div>'''
+                    )
+                st.markdown("".join(rows_html), unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '''<div style="padding:10px 8px;border:1px solid #D9E4EC;border-top:0;border-radius:0 0 7px 7px;background:#F8FAFC;color:#64748B;font-family:Arial,sans-serif;font-size:12px;text-align:center;">Sin estaciones</div>''',
+                    unsafe_allow_html=True,
+                )
 
 
 def calculate_center(gdfs):
