@@ -652,24 +652,33 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 2rem;
+        padding-top: 3.2rem;
         padding-bottom: 1rem;
     }
 
     .main-title {
         font-family: Arial, sans-serif;
-        font-size: 27px;
-        line-height: 1.25;
-        font-weight: 750;
+        font-size: 25px;
+        line-height: 1.35;
+        font-weight: 700;
         color: #12344D;
-        margin: 0 0 18px 0;
+        margin: 0 0 20px 0;
         padding: 0;
         overflow: visible;
         white-space: normal;
+        word-break: normal;
+        overflow-wrap: normal;
     }
 
     [data-testid="stSidebar"] {
         background-color: #F7F9FC;
+    }
+
+    @media (max-width: 1200px) {
+        .main-title {
+            font-size: 23px;
+            line-height: 1.3;
+        }
     }
     </style>
     """,
