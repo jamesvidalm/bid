@@ -6,6 +6,7 @@ from folium.plugins import Fullscreen, MousePosition, MiniMap
 from streamlit_folium import st_folium
 from branca.element import MacroElement, Template
 from pathlib import Path
+import re
 import pandas as pd
 import html
 import hashlib
@@ -75,10 +76,45 @@ def nice_name(path: Path) -> str:
 
 
 def find_shapefiles(folder: Path):
-    """Busca shapefiles recursivamente."""
+    """
+    Busca shapefiles recursivamente, excluyendo archivos específicos
+    que no deben aparecer en el dashboard.
+    """
     if not folder.exists():
         return []
-    return sorted(folder.rglob("*.shp"), key=lambda p: p.name.lower())
+
+    shapefiles = []
+
+    for shp in folder.rglob("*.shp"):
+        stem_lower = shp.stem.lower()
+
+        # --------------------------------------------------------
+        # EXCLUSIONES
+        # --------------------------------------------------------
+        # 1. HYBAS Lake South America Level 01-12
+        if (
+            stem_lower.startswith("hybas_lake_sa_level")
+            and stem_lower.endswith("_v1c")
+        ):
+            level_text = stem_lower.replace(
+                "hybas_lake_sa_level", ""
+            ).replace("_v1c", "")
+
+            if level_text.isdigit():
+                level = int(level_text)
+                if 1 <= level <= 12:
+                    continue
+
+        # 2. Hydro_RIVERS_v10
+        if stem_lower == "hydro_rivers_v10":
+            continue
+
+        # --------------------------------------------------------
+        # Todo lo demás SÍ se considera
+        # --------------------------------------------------------
+        shapefiles.append(shp)
+
+    return sorted(shapefiles, key=lambda p: p.name.lower())
 
 
 @st.cache_data(show_spinner=False)
