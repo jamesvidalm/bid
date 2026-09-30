@@ -45,6 +45,11 @@ GROUPS = {
         "folder": RIVER_DIR,
         "geometry": "line",
     },
+    "limites": {
+        "label": "Límites",
+        "folder": DATA_DIR / "limite",
+        "geometry": "line",
+    },
     "estaciones": {
         "label": "Estaciones / Puntos",
         "folder": DATA_DIR / "estaciones",
@@ -165,6 +170,11 @@ def discover_files():
     # Cuencas
     result["cuenca"] = find_shapefiles(
         DATA_DIR / "cuenca"
+    )
+
+    # Límites
+    result["limites"] = find_shapefiles(
+        DATA_DIR / "limite"
     )
 
     # Estaciones
@@ -511,6 +521,127 @@ def add_river_layer(m, gdf, layer_name):
     fg.add_to(m)
 
 
+def add_limit_layer(m, gdf, layer_name):
+    """
+    Agrega la capa de límites administrativos/territoriales.
+    Se muestra con una línea un poco más gruesa para que la
+    delimitación sea claramente visible sobre las cuencas.
+    """
+    fg = FeatureGroup(name=layer_name, show=True)
+
+    limit_geojson = gdf.to_json()
+
+    folium.GeoJson(
+        limit_geojson,
+        name=layer_name,
+        style_function=lambda feature: {
+            "color": "#333333",
+            "weight": 2.8,
+            "opacity": 0.95,
+            "fillOpacity": 0.0,
+        },
+        highlight_function=lambda feature: {
+            "color": "#111111",
+            "weight": 4.0,
+            "opacity": 1.0,
+            "fillOpacity": 0.02,
+        },
+    ).add_to(fg)
+
+    fg.add_to(m)
+
+
+def add_closure_station(m):
+    """
+    Estación de cierre:
+    Puerto Alegría, Perú
+    Coordenadas de la imagen:
+      Latitud  = 4° 6' 53.83" S
+      Longitud = 70° 3' 14.24" O
+
+    Convertidas a grados decimales:
+      Latitud  = -4.1149528
+      Longitud = -70.0539556
+    """
+    lat = -4.1149528
+    lon = -70.0539556
+    layer_name = "Estación de cierre Peru - Puerto Alegria"
+
+    fg = FeatureGroup(name=layer_name, show=True)
+
+    folium.CircleMarker(
+        location=[lat, lon],
+        radius=9,
+        color="#FFFFFF",
+        weight=2.5,
+        fill=True,
+        fill_color="#7C3AED",
+        fill_opacity=1.0,
+        popup=folium.Popup(
+            f"""
+            <div style="font-family:Arial,sans-serif; min-width:260px;">
+                <div style="
+                    font-size:15px;
+                    font-weight:700;
+                    color:#12344D;
+                    margin-bottom:8px;">
+                    Estación de cierre Peru - Puerto Alegria
+                </div>
+                <table style="border-collapse:collapse; width:100%; font-size:12px;">
+                    <tr>
+                        <td style="font-weight:600; padding:5px 8px; border-bottom:1px solid #E5E7EB;">
+                            Latitud
+                        </td>
+                        <td style="padding:5px 8px; border-bottom:1px solid #E5E7EB;">
+                            -4.1149528
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight:600; padding:5px 8px;">
+                            Longitud
+                        </td>
+                        <td style="padding:5px 8px;">
+                            -70.0539556
+                        </td>
+                    </tr>
+                </table>
+            </div>
+            """,
+            max_width=400,
+        ),
+        tooltip=folium.Tooltip(
+            "Estación de cierre Peru - Puerto Alegria",
+            sticky=False,
+        ),
+    ).add_to(fg)
+
+    # Etiqueta visible en el mapa
+    folium.Marker(
+        location=[lat, lon],
+        icon=folium.DivIcon(
+            html="""
+            <div style="
+                font-family:Arial,sans-serif;
+                font-size:12px;
+                font-weight:700;
+                color:#4C1D95;
+                white-space:nowrap;
+                margin-left:10px;
+                margin-top:-8px;
+                text-shadow:
+                    -1px -1px 0 #fff,
+                     1px -1px 0 #fff,
+                    -1px  1px 0 #fff,
+                     1px  1px 0 #fff;">
+                Estación de cierre Peru - Puerto Alegria
+            </div>
+            """
+        ),
+    ).add_to(fg)
+
+    fg.add_to(m)
+
+
 def add_station_group(
     m,
     gdf,
@@ -692,7 +823,7 @@ st.markdown(
 st.markdown(
     """
     <div class="main-title">
-        Consultoría para el Modelamiento Hidrológico de las Cuencas
+        Modelamiento Hidrológico de las Cuencas
         Andino-Amazónicas de Ecuador, Perú y Bolivia
     </div>
     """,
@@ -800,6 +931,43 @@ with st.sidebar:
         pass
 
     # --------------------------------------------------------
+    # LÍMITES
+    # --------------------------------------------------------
+    st.markdown("### Límites")
+
+    if files["limites"]:
+        for path in files["limites"]:
+            layer_id = (
+                f"limites__{path.as_posix()}"
+            )
+
+            selected[layer_id] = st.checkbox(
+                nice_name(path),
+                value=True,
+                key=(
+                    "check_"
+                    + hashlib.md5(
+                        layer_id.encode()
+                    ).hexdigest()
+                ),
+            )
+    else:
+        st.caption("No se encontraron límites.")
+
+    # --------------------------------------------------------
+    # ESTACIÓN DE CIERRE
+    # --------------------------------------------------------
+    st.markdown("### Estación de cierre")
+
+    closure_layer_id = "estacion_cierre__puerto_alegria"
+
+    selected[closure_layer_id] = st.checkbox(
+        "Estación de cierre Peru - Puerto Alegria",
+        value=True,
+        key="check_estacion_cierre_puerto_alegria",
+    )
+
+    # --------------------------------------------------------
     # ESTACIONES
     # --------------------------------------------------------
     st.markdown("### Estaciones / Puntos")
@@ -852,6 +1020,18 @@ for group_key, cfg in GROUPS.items():
         except Exception:
             pass
 
+
+# Incluir la estación de cierre en el cálculo del centro cuando está activa.
+if selected.get("estacion_cierre__puerto_alegria", False):
+    closure_gdf = gpd.GeoDataFrame(
+        {"nombre": ["Estación de cierre Peru - Puerto Alegria"]},
+        geometry=gpd.points_from_xy(
+            [-70.0539556],
+            [-4.1149528],
+        ),
+        crs="EPSG:4326",
+    )
+    selected_gdfs.append(closure_gdf)
 
 center, zoom = calculate_center(
     selected_gdfs
@@ -975,6 +1155,43 @@ for path in files["rio"]:
         st.warning(
             f"No se pudo cargar el río {path.name}: {e}"
         )
+
+
+# ============================================================
+# DIBUJAR LÍMITES
+# ============================================================
+for path in files["limites"]:
+
+    layer_id = (
+        f"limites__{path.as_posix()}"
+    )
+
+    if not selected.get(layer_id, False):
+        continue
+
+    try:
+        gdf = load_layer(str(path))
+
+        if gdf.empty:
+            continue
+
+        add_limit_layer(
+            m=m,
+            gdf=gdf,
+            layer_name=nice_name(path),
+        )
+
+    except Exception as e:
+        st.warning(
+            f"No se pudo cargar el límite {path.name}: {e}"
+        )
+
+
+# ============================================================
+# DIBUJAR ESTACIÓN DE CIERRE
+# ============================================================
+if selected.get("estacion_cierre__puerto_alegria", False):
+    add_closure_station(m)
 
 
 # ============================================================
