@@ -1009,6 +1009,117 @@ def build_station_summary(station_files):
     ]
 
 
+def build_station_list(station_files, selected_country):
+    """
+    Construye la lista de estaciones pertenecientes al país seleccionado.
+
+    Para cada estación se conserva:
+      - Tipo: Amaru, BID o Altimetría
+      - Nombre de la estación
+      - Archivo/grupo de origen (como referencia)
+
+    El país se determina con la misma lógica utilizada en el resumen:
+      1) campo de país del shapefile, si existe;
+      2) ubicación geográfica del punto contra los límites nacionales.
+    """
+    rows = []
+
+    for path in station_files:
+        station_type = station_type_from_filename(path)
+
+        if station_type is None:
+            continue
+
+        try:
+            gdf = load_layer(str(path))
+
+            if gdf.empty:
+                continue
+
+            gdf = assign_station_countries(gdf)
+            name_field = get_station_name_field(gdf)
+
+            for idx, row in gdf.iterrows():
+                country = row.get("pais_resumen")
+
+                if normalize_country(country) != selected_country:
+                    continue
+
+                geom = row.geometry
+
+                if geom is None or geom.is_empty:
+                    continue
+
+                if name_field is not None:
+                    raw_name = row.get(name_field)
+                    if pd.notna(raw_name) and str(raw_name).strip():
+                        station_name = str(raw_name).strip()
+                    else:
+                        station_name = f"Punto {idx + 1}"
+                else:
+                    station_name = f"Punto {idx + 1}"
+
+                # Point = una estación.
+                if geom.geom_type == "Point":
+                    rows.append(
+                        {
+                            "Tipo de estación": station_type,
+                            "Nombre de estación": station_name,
+                            "Grupo / archivo": nice_name(path),
+                        }
+                    )
+
+                # MultiPoint = una fila por punto. Si el atributo de nombre
+                # es común al registro, se conserva el nombre original.
+                elif geom.geom_type == "MultiPoint":
+                    for point_idx, _ in enumerate(geom.geoms, start=1):
+                        name_for_point = station_name
+                        if station_name.startswith("Punto ") and len(geom.geoms) > 1:
+                            name_for_point = f"{station_name} - {point_idx}"
+
+                        rows.append(
+                            {
+                                "Tipo de estación": station_type,
+                                "Nombre de estación": name_for_point,
+                                "Grupo / archivo": nice_name(path),
+                            }
+                        )
+
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "Tipo de estación",
+                "Nombre de estación",
+                "Grupo / archivo",
+            ]
+        )
+
+    result = pd.DataFrame(rows)
+
+    # Evitar duplicados cuando una misma estación aparece en más de un
+    # shapefile o en archivos repetidos.
+    result = result.drop_duplicates(
+        subset=["Tipo de estación", "Nombre de estación"],
+        keep="first",
+    )
+
+    type_order = pd.CategoricalDtype(
+        categories=["Amaru", "BID", "Altimetría"],
+        ordered=True,
+    )
+    result["Tipo de estación"] = result["Tipo de estación"].astype(type_order)
+
+    result = result.sort_values(
+        by=["Tipo de estación", "Nombre de estación"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    return result
+
+
 def show_station_summary(station_files):
     """
     Muestra dos tablas limpias y profesionales:
@@ -1197,6 +1308,56 @@ def show_station_summary(station_files):
             total_row=True,
         )
     )
+
+    # ========================================================
+    # LISTA DE ESTACIONES DEL PAÍS SELECCIONADO
+    # ========================================================
+    st.markdown(
+        f'<div class="summary-table-title">Estaciones de {html.escape(selected_country)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "Listado nominal de las estaciones clasificadas por grupo según su ubicación geográfica."
+    )
+
+    station_list = build_station_list(
+        station_files,
+        selected_country,
+    )
+
+    if station_list.empty:
+        st.info(
+            f"No se encontraron nombres de estaciones para {selected_country}."
+        )
+        return
+
+    # Mostrar el grupo y el nombre. Se elimina la columna técnica del archivo
+    # de origen para que el usuario vea principalmente qué estaciones existen.
+    station_list_display = station_list[
+        ["Tipo de estación", "Nombre de estación"]
+    ].copy()
+
+    # Convertir la categoría a texto para una representación limpia.
+    station_list_display["Tipo de estación"] = station_list_display[
+        "Tipo de estación"
+    ].astype(str)
+
+    # Numeración para facilitar la lectura.
+    station_list_display.insert(
+        0,
+        "N°",
+        range(1, len(station_list_display) + 1),
+    )
+
+    st.table(
+        style_table(
+            station_list_display,
+            first_column_left=False,
+            total_row=False,
+        )
+    )
+
 
 def calculate_center(gdfs):
     bounds = []
