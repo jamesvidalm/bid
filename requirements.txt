@@ -1,7 +1,6 @@
-streamlit>=1.40
-geopandas>=1.0
-pyogrio>=0.9
-fiona>=1.9
+streamlit>=1.40,<2.0
+geopandas>=1.0,<2.0
+pyogrio>=0.10
 shapely>=2.0
 pyproj>=3.6
 folium>=0.17
