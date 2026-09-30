@@ -652,22 +652,20 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1rem;
+        padding-top: 2rem;
         padding-bottom: 1rem;
     }
 
     .main-title {
         font-family: Arial, sans-serif;
-        font-size: 30px;
+        font-size: 27px;
+        line-height: 1.25;
         font-weight: 750;
         color: #12344D;
-        margin-bottom: 3px;
-    }
-
-    .subtitle {
-        color: #64748B;
-        font-size: 14px;
-        margin-bottom: 18px;
+        margin: 0 0 18px 0;
+        padding: 0;
+        overflow: visible;
+        white-space: normal;
     }
 
     [data-testid="stSidebar"] {
@@ -685,10 +683,8 @@ st.markdown(
 st.markdown(
     """
     <div class="main-title">
-        Visor Hidrológico Sudamérica
-    </div>
-    <div class="subtitle">
-        Explorador geoespacial de cuencas, ríos y estaciones hidrológicas
+        Consultoría para el Modelamiento Hidrológico de las Cuencas
+        Andino-Amazónicas de Ecuador, Perú y Bolivia
     </div>
     """,
     unsafe_allow_html=True,
