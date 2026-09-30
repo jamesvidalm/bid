@@ -1011,38 +1011,67 @@ def build_station_summary(station_files):
 
 def show_station_summary(station_files):
     """
-    Muestra:
-      1. Tabla resumen de los tres países.
-      2. Selector de país.
-      3. Tabla detallada del país seleccionado.
+    Muestra dos tablas:
+      1. Resumen general de Perú, Bolivia y Ecuador.
+      2. Resumen del país seleccionado.
     """
+
     summary = build_station_summary(station_files)
 
     st.markdown("## Resumen de estaciones")
 
     st.caption(
-        "Cantidad de estaciones por país y grupo, según la ubicación "
-        "geográfica de cada punto."
+        "Cantidad de estaciones por país y grupo, según la ubicación geográfica de cada punto."
     )
 
-    # Tabla 1: todos los países
-    table_all = summary.rename(
-        columns={
-            "Pais": "País",
-            "Amaru": "Amaru",
-            "BID": "BID",
-            "Altimetría": "Altimetría",
-            "Total": "Total",
-        }
+    # --------------------------------------------------------
+    # TABLA 1: RESUMEN GENERAL
+    # --------------------------------------------------------
+    st.markdown(
+        '<div class="summary-table-title">Resumen por país</div>',
+        unsafe_allow_html=True,
     )
 
-    st.dataframe(
-        table_all,
-        use_container_width=True,
-        hide_index=True,
+    html_rows = ""
+
+    for _, row in summary.iterrows():
+        html_rows += f"""
+        <tr>
+            <td>{html.escape(str(row["Pais"]))}</td>
+            <td>{int(row["Amaru"])}</td>
+            <td>{int(row["BID"])}</td>
+            <td>{int(row["Altimetría"])}</td>
+            <td>{int(row["Total"])}</td>
+        </tr>
+        """
+
+    table_general = f"""
+    <div class="summary-table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>País</th>
+                    <th>Amaru</th>
+                    <th>BID</th>
+                    <th>Altimetría</th>
+                    <th>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {html_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    st.markdown(
+        table_general,
+        unsafe_allow_html=True,
     )
 
-    # Tabla 2: país seleccionado
+    # --------------------------------------------------------
+    # TABLA 2: PAÍS SELECCIONADO
+    # --------------------------------------------------------
     selected_country = st.selectbox(
         "Selecciona un país para ver el detalle",
         COUNTRIES,
@@ -1054,39 +1083,55 @@ def show_station_summary(station_files):
         summary["Pais"] == selected_country
     ].copy()
 
-    if not selected_row.empty:
-        detail = pd.DataFrame(
-            {
-                "Tipo de estación": [
-                    "Amaru",
-                    "BID",
-                    "Altimetría",
-                ],
-                "Cantidad": [
-                    int(selected_row.iloc[0]["Amaru"]),
-                    int(selected_row.iloc[0]["BID"]),
-                    int(selected_row.iloc[0]["Altimetría"]),
-                ],
-            }
-        )
+    if selected_row.empty:
+        return
 
-        total = int(selected_row.iloc[0]["Total"])
+    row = selected_row.iloc[0]
 
-        st.markdown(
-            f"### Estaciones en {selected_country}"
-        )
+    st.markdown(
+        f'<div class="summary-table-title">Detalle de estaciones — {html.escape(selected_country)}</div>',
+        unsafe_allow_html=True,
+    )
 
-        st.dataframe(
-            detail,
-            use_container_width=True,
-            hide_index=True,
-        )
+    detail_rows = f"""
+        <tr>
+            <td>Amaru</td>
+            <td>{int(row["Amaru"])}</td>
+        </tr>
+        <tr>
+            <td>BID</td>
+            <td>{int(row["BID"])}</td>
+        </tr>
+        <tr>
+            <td>Altimetría</td>
+            <td>{int(row["Altimetría"])}</td>
+        </tr>
+        <tr class="total-row">
+            <td>Total</td>
+            <td>{int(row["Total"])}</td>
+        </tr>
+    """
 
-        st.metric(
-            "Total de estaciones",
-            total,
-        )
+    table_detail = f"""
+    <div class="summary-table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tipo de estación</th>
+                    <th>Cantidad</th>
+                </tr>
+            </thead>
+            <tbody>
+                {detail_rows}
+            </tbody>
+        </table>
+    </div>
+    """
 
+    st.markdown(
+        table_detail,
+        unsafe_allow_html=True,
+    )
 
 def calculate_center(gdfs):
     bounds = []
@@ -1163,6 +1208,72 @@ st.markdown(
     [data-testid="stSidebar"] {
         background-color: #F7F9FC;
     }
+
+    /* ========================================================
+       TABLAS DEL RESUMEN
+       Azul medio, elegante y suave para el dashboard
+       ======================================================== */
+    .summary-table-title {
+        font-family: Arial, sans-serif;
+        font-size: 18px;
+        font-weight: 700;
+        color: #12344D;
+        margin: 12px 0 8px 0;
+    }
+
+    .summary-table-wrap {
+        border: 1px solid #D8E3EC;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-bottom: 16px;
+        background: white;
+        box-shadow: 0 1px 4px rgba(18, 52, 77, 0.06);
+    }
+
+    .summary-table-wrap table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: Arial, sans-serif;
+        font-size: 13px;
+    }
+
+    .summary-table-wrap th {
+        background: #5B8EAD;
+        color: white;
+        font-weight: 700;
+        text-align: center;
+        padding: 10px 12px;
+        border-right: 1px solid rgba(255,255,255,0.25);
+    }
+
+    .summary-table-wrap td {
+        color: #334155;
+        padding: 9px 12px;
+        text-align: center;
+        border-bottom: 1px solid #E5ECF2;
+    }
+
+    .summary-table-wrap tr:nth-child(even) td {
+        background: #F5F9FC;
+    }
+
+    .summary-table-wrap tr:hover td {
+        background: #EAF2F7;
+    }
+
+    .summary-table-wrap td:first-child {
+        font-weight: 600;
+        text-align: left;
+        color: #244B63;
+    }
+
+    .summary-table-wrap .total-row td {
+        font-weight: 700;
+        background: #E8F1F6;
+        color: #1F465F;
+        border-top: 1px solid #C9DCE8;
+    }
+
 
     @media (max-width: 1200px) {
         .main-title {
