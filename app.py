@@ -1011,9 +1011,12 @@ def build_station_summary(station_files):
 
 def show_station_summary(station_files):
     """
-    Muestra dos tablas:
+    Muestra dos tablas limpias y profesionales:
       1. Resumen general de Perú, Bolivia y Ecuador.
       2. Resumen del país seleccionado.
+
+    Se utiliza Pandas Styler para evitar que el HTML aparezca
+    como texto en Streamlit.
     """
 
     summary = build_station_summary(station_files)
@@ -1024,54 +1027,128 @@ def show_station_summary(station_files):
         "Cantidad de estaciones por país y grupo, según la ubicación geográfica de cada punto."
     )
 
-    # --------------------------------------------------------
+    # ========================================================
+    # ESTILO DE TABLAS
+    # ========================================================
+    HEADER_BLUE = "#5B8EAD"       # Azul medio
+    HEADER_BLUE_DARK = "#4D7F9C"
+    BORDER = "#D9E4EC"
+    TEXT = "#334155"
+    LIGHT_BLUE = "#F4F8FB"
+    HOVER_BLUE = "#EAF2F7"
+    TOTAL_BLUE = "#E5F0F6"
+
+    def style_table(df, first_column_left=True, total_row=False):
+        styler = (
+            df.style
+            .set_properties(
+                **{
+                    "font-family": "Arial, sans-serif",
+                    "font-size": "13px",
+                    "color": TEXT,
+                    "text-align": "center",
+                    "border": f"1px solid {BORDER}",
+                    "padding": "8px 12px",
+                }
+            )
+            .set_table_styles(
+                [
+                    {
+                        "selector": "table",
+                        "props": [
+                            ("width", "100%"),
+                            ("border-collapse", "collapse"),
+                            ("border-radius", "8px"),
+                            ("overflow", "hidden"),
+                            ("background-color", "white"),
+                            ("box-shadow", "0 1px 4px rgba(18,52,77,0.08)"),
+                            ("margin-bottom", "18px"),
+                        ],
+                    },
+                    {
+                        "selector": "th",
+                        "props": [
+                            ("background-color", HEADER_BLUE),
+                            ("color", "white"),
+                            ("font-weight", "700"),
+                            ("text-align", "center"),
+                            ("border", f"1px solid {HEADER_BLUE_DARK}"),
+                            ("padding", "9px 12px"),
+                        ],
+                    },
+                    {
+                        "selector": "tbody tr:nth-child(even) td",
+                        "props": [
+                            ("background-color", LIGHT_BLUE),
+                        ],
+                    },
+                    {
+                        "selector": "tbody tr:hover td",
+                        "props": [
+                            ("background-color", HOVER_BLUE),
+                        ],
+                    },
+                ]
+            )
+            .hide(axis="index")
+        )
+
+        if first_column_left:
+            styler = styler.set_properties(
+                subset=pd.IndexSlice[:, [df.columns[0]]],
+                **{
+                    "text-align": "left",
+                    "font-weight": "600",
+                    "color": "#244B63",
+                },
+            )
+
+        if total_row and len(df) > 0:
+            styler = styler.set_properties(
+                subset=pd.IndexSlice[[len(df) - 1], :],
+                **{
+                    "background-color": TOTAL_BLUE,
+                    "font-weight": "700",
+                    "color": "#1F465F",
+                    "border-top": f"1px solid {BORDER}",
+                },
+            )
+
+        return styler
+
+    # ========================================================
     # TABLA 1: RESUMEN GENERAL
-    # --------------------------------------------------------
+    # ========================================================
     st.markdown(
         '<div class="summary-table-title">Resumen por país</div>',
         unsafe_allow_html=True,
     )
 
-    html_rows = ""
+    table_general = summary.rename(
+        columns={
+            "Pais": "País",
+            "Amaru": "Amaru",
+            "BID": "BID",
+            "Altimetría": "Altimetría",
+            "Total": "Total",
+        }
+    ).copy()
 
-    for _, row in summary.iterrows():
-        html_rows += f"""
-        <tr>
-            <td>{html.escape(str(row["Pais"]))}</td>
-            <td>{int(row["Amaru"])}</td>
-            <td>{int(row["BID"])}</td>
-            <td>{int(row["Altimetría"])}</td>
-            <td>{int(row["Total"])}</td>
-        </tr>
-        """
+    # Asegurar enteros.
+    for col in ["Amaru", "BID", "Altimetría", "Total"]:
+        table_general[col] = table_general[col].astype(int)
 
-    table_general = f"""
-    <div class="summary-table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>País</th>
-                    <th>Amaru</th>
-                    <th>BID</th>
-                    <th>Altimetría</th>
-                    <th>Total</th>
-                </tr>
-            </thead>
-            <tbody>
-                {html_rows}
-            </tbody>
-        </table>
-    </div>
-    """
-
-    st.markdown(
-        table_general,
-        unsafe_allow_html=True,
+    st.table(
+        style_table(
+            table_general,
+            first_column_left=True,
+            total_row=False,
+        )
     )
 
-    # --------------------------------------------------------
-    # TABLA 2: PAÍS SELECCIONADO
-    # --------------------------------------------------------
+    # ========================================================
+    # SELECTOR DE PAÍS
+    # ========================================================
     selected_country = st.selectbox(
         "Selecciona un país para ver el detalle",
         COUNTRIES,
@@ -1088,49 +1165,37 @@ def show_station_summary(station_files):
 
     row = selected_row.iloc[0]
 
+    # ========================================================
+    # TABLA 2: DETALLE DEL PAÍS
+    # ========================================================
     st.markdown(
         f'<div class="summary-table-title">Detalle de estaciones — {html.escape(selected_country)}</div>',
         unsafe_allow_html=True,
     )
 
-    detail_rows = f"""
-        <tr>
-            <td>Amaru</td>
-            <td>{int(row["Amaru"])}</td>
-        </tr>
-        <tr>
-            <td>BID</td>
-            <td>{int(row["BID"])}</td>
-        </tr>
-        <tr>
-            <td>Altimetría</td>
-            <td>{int(row["Altimetría"])}</td>
-        </tr>
-        <tr class="total-row">
-            <td>Total</td>
-            <td>{int(row["Total"])}</td>
-        </tr>
-    """
+    detail = pd.DataFrame(
+        {
+            "Tipo de estación": [
+                "Amaru",
+                "BID",
+                "Altimetría",
+                "Total",
+            ],
+            "Cantidad": [
+                int(row["Amaru"]),
+                int(row["BID"]),
+                int(row["Altimetría"]),
+                int(row["Total"]),
+            ],
+        }
+    )
 
-    table_detail = f"""
-    <div class="summary-table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Tipo de estación</th>
-                    <th>Cantidad</th>
-                </tr>
-            </thead>
-            <tbody>
-                {detail_rows}
-            </tbody>
-        </table>
-    </div>
-    """
-
-    st.markdown(
-        table_detail,
-        unsafe_allow_html=True,
+    st.table(
+        style_table(
+            detail,
+            first_column_left=True,
+            total_row=True,
+        )
     )
 
 def calculate_center(gdfs):
@@ -1208,72 +1273,6 @@ st.markdown(
     [data-testid="stSidebar"] {
         background-color: #F7F9FC;
     }
-
-    /* ========================================================
-       TABLAS DEL RESUMEN
-       Azul medio, elegante y suave para el dashboard
-       ======================================================== */
-    .summary-table-title {
-        font-family: Arial, sans-serif;
-        font-size: 18px;
-        font-weight: 700;
-        color: #12344D;
-        margin: 12px 0 8px 0;
-    }
-
-    .summary-table-wrap {
-        border: 1px solid #D8E3EC;
-        border-radius: 10px;
-        overflow: hidden;
-        margin-bottom: 16px;
-        background: white;
-        box-shadow: 0 1px 4px rgba(18, 52, 77, 0.06);
-    }
-
-    .summary-table-wrap table {
-        width: 100%;
-        border-collapse: collapse;
-        font-family: Arial, sans-serif;
-        font-size: 13px;
-    }
-
-    .summary-table-wrap th {
-        background: #5B8EAD;
-        color: white;
-        font-weight: 700;
-        text-align: center;
-        padding: 10px 12px;
-        border-right: 1px solid rgba(255,255,255,0.25);
-    }
-
-    .summary-table-wrap td {
-        color: #334155;
-        padding: 9px 12px;
-        text-align: center;
-        border-bottom: 1px solid #E5ECF2;
-    }
-
-    .summary-table-wrap tr:nth-child(even) td {
-        background: #F5F9FC;
-    }
-
-    .summary-table-wrap tr:hover td {
-        background: #EAF2F7;
-    }
-
-    .summary-table-wrap td:first-child {
-        font-weight: 600;
-        text-align: left;
-        color: #244B63;
-    }
-
-    .summary-table-wrap .total-row td {
-        font-weight: 700;
-        background: #E8F1F6;
-        color: #1F465F;
-        border-top: 1px solid #C9DCE8;
-    }
-
 
     @media (max-width: 1200px) {
         .main-title {
