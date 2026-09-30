@@ -6,13 +6,12 @@ from folium.plugins import Fullscreen, MousePosition, MiniMap
 from streamlit_folium import st_folium
 from branca.element import MacroElement, Template
 from pathlib import Path
-import re
 import pandas as pd
 import html
 import hashlib
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GENERAL
 # ============================================================
 st.set_page_config(
     page_title="Visor Hidrológico Sudamérica",
@@ -25,60 +24,78 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
 # Estructura esperada:
+#
 # data/
 # ├── cuenca/
 # ├── rio/
 # ├── estaciones/
-# └── limite/
+# └── limite/       <- NO SE USA
 #
-# El programa busca TODOS los .shp dentro de esas carpetas,
-# incluyendo subcarpetas.
+# El programa busca todos los .shp dentro de cuenca, rio y
+# estaciones, incluyendo subcarpetas.
 
 GROUPS = {
     "cuenca": {
-        "label": "Cuencas",
+        "label": "Cuencas analizadas",
         "folder": DATA_DIR / "cuenca",
         "geometry": "polygon",
-        "color": "#2E86AB",
     },
     "rio": {
         "label": "Ríos",
         "folder": DATA_DIR / "rio",
         "geometry": "line",
-        "color": "#1677FF",
     },
     "estaciones": {
         "label": "Estaciones / Puntos",
         "folder": DATA_DIR / "estaciones",
         "geometry": "point",
-        "color": "#E63946",
-    },
-    "limite": {
-        "label": "Límite / Sudamérica",
-        "folder": DATA_DIR / "limite",
-        "geometry": "polygon",
-        "color": "#555555",
     },
 }
 
-PALETTE = [
-    "#2563EB", "#059669", "#7C3AED", "#DC2626", "#EA580C",
-    "#0891B2", "#CA8A04", "#DB2777", "#4F46E5", "#65A30D",
-    "#9333EA", "#0F766E", "#B45309", "#BE123C", "#0369A1",
+# ============================================================
+# PALETAS
+# ============================================================
+
+# Muchos colores diferenciables para cuencas.
+BASIN_COLORS = [
+    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
+    "#003F5C", "#58508D", "#BC5090", "#FF6361", "#FFA600",
+    "#006D77", "#83C5BE", "#E29578", "#6A4C93", "#1982C4",
+    "#8AC926", "#FFCA3A", "#FF595E", "#9B5DE5", "#00BBF9",
+    "#00F5D4", "#F15BB5", "#4D908E", "#577590", "#F3722C",
+    "#90BE6D", "#F9C74F", "#F94144", "#43AA8B", "#277DA1",
+]
+
+# Colores para puntos/estaciones.
+STATION_COLORS = [
+    "#E63946", "#1D3557", "#2A9D8F", "#F4A261", "#E76F51",
+    "#6A4C93", "#1982C4", "#8AC926", "#FFCA3A", "#FF595E",
+    "#00A6A6", "#7B2CBF", "#F72585", "#3A86FF", "#8338EC",
+    "#FB5607", "#2EC4B6", "#011627", "#FF006E", "#3A0CA3",
+    "#7209B7", "#4895EF", "#06D6A0", "#EF476F", "#118AB2",
+    "#073B4C", "#8D99AE", "#D90429", "#2B2D42", "#0096C7",
+    "#52B788", "#B5179E", "#4361EE", "#F77F00", "#2A9D8F",
 ]
 
 # ============================================================
-# UTILIDADES
+# FUNCIONES
 # ============================================================
+
 def nice_name(path: Path) -> str:
-    """Convierte nombre de archivo a un nombre legible."""
+    """Nombre legible del archivo."""
     return path.stem.replace("_", " ").replace("-", " ").title()
 
 
 def find_shapefiles(folder: Path):
     """
-    Busca shapefiles recursivamente, excluyendo archivos específicos
-    que no deben aparecer en el dashboard.
+    Busca shapefiles recursivamente.
+
+    EXCLUYE:
+      - hybas_lake_sa_level01_v1c.shp ... level12
+      - Hydro_RIVERS_v10.shp
+
+    NO carga la carpeta data/limite.
     """
     if not folder.exists():
         return []
@@ -88,10 +105,9 @@ def find_shapefiles(folder: Path):
     for shp in folder.rglob("*.shp"):
         stem_lower = shp.stem.lower()
 
-        # --------------------------------------------------------
-        # EXCLUSIONES
-        # --------------------------------------------------------
-        # 1. HYBAS Lake South America Level 01-12
+        # ----------------------------------------------------
+        # EXCLUSIÓN: HYBAS Level 01 hasta Level 12
+        # ----------------------------------------------------
         if (
             stem_lower.startswith("hybas_lake_sa_level")
             and stem_lower.endswith("_v1c")
@@ -105,13 +121,12 @@ def find_shapefiles(folder: Path):
                 if 1 <= level <= 12:
                     continue
 
-        # 2. Hydro_RIVERS_v10
+        # ----------------------------------------------------
+        # EXCLUSIÓN: Hydro_RIVERS_v10
+        # ----------------------------------------------------
         if stem_lower == "hydro_rivers_v10":
             continue
 
-        # --------------------------------------------------------
-        # Todo lo demás SÍ se considera
-        # --------------------------------------------------------
         shapefiles.append(shp)
 
     return sorted(shapefiles, key=lambda p: p.name.lower())
@@ -127,26 +142,20 @@ def discover_files():
 
 @st.cache_data(show_spinner=True, ttl=3600)
 def load_layer(path_str: str):
-    """
-    Lee un shapefile y lo convierte a WGS84.
-    Devuelve GeoDataFrame.
-    """
+    """Lee el shapefile y lo transforma a WGS84."""
     gdf = gpd.read_file(path_str)
 
     if gdf.empty:
         return gdf
 
-    if gdf.crs is None:
-        # Se intenta mostrar, pero no se inventa una proyección.
-        # La mayoría de los shapefiles suministrados deben tener .prj.
-        st.warning(
-            f"El archivo {Path(path_str).name} no tiene CRS (.prj). "
-            "Se mantendrá su sistema de coordenadas original."
-        )
-    else:
+    if gdf.crs is not None:
         gdf = gdf.to_crs(epsg=4326)
+    else:
+        # No se inventa CRS si falta el .prj.
+        st.warning(
+            f"El archivo {Path(path_str).name} no tiene CRS (.prj)."
+        )
 
-    # Eliminar geometrías vacías o nulas
     gdf = gdf[gdf.geometry.notna()].copy()
     gdf = gdf[~gdf.geometry.is_empty].copy()
 
@@ -159,23 +168,68 @@ def safe_text(value):
     return html.escape(str(value))
 
 
-def popup_html(row):
-    """Genera un popup profesional con los atributos del elemento."""
+def get_label_field(gdf):
+    """
+    Busca un campo razonable para identificar estaciones/puntos
+    y elementos de cuenca.
+    """
+    preferred = [
+        "nombre", "NOMBRE", "name", "NAME",
+        "station", "STATION", "estacion", "ESTACION",
+        "codigo", "CODIGO", "code", "CODE",
+        "id", "ID", "site", "SITE"
+    ]
+
+    columns = [c for c in gdf.columns if c != "geometry"]
+
+    for wanted in preferred:
+        for col in columns:
+            if str(col).lower() == wanted.lower():
+                return col
+
+    # Buscar por palabras clave.
+    keywords = [
+        "nombre", "name", "station", "estacion",
+        "codigo", "code", "id"
+    ]
+
+    for col in columns:
+        low = str(col).lower()
+        if any(k in low for k in keywords):
+            return col
+
+    return columns[0] if columns else None
+
+
+def popup_html(row, title="Información"):
+    """Popup profesional con atributos."""
     attrs = []
+
     for col in row.index:
         if col == "geometry":
             continue
+
         value = row[col]
+
         if pd.isna(value):
             continue
+
         attrs.append(
             f"""
             <tr>
-                <td style="font-weight:600;padding:4px 8px;
-                           border-bottom:1px solid #eee;">
+                <td style="
+                    font-weight:600;
+                    padding:5px 8px;
+                    border-bottom:1px solid #E5E7EB;
+                    color:#334155;
+                ">
                     {safe_text(col)}
                 </td>
-                <td style="padding:4px 8px;border-bottom:1px solid #eee;">
+                <td style="
+                    padding:5px 8px;
+                    border-bottom:1px solid #E5E7EB;
+                    color:#475569;
+                ">
                     {safe_text(value)}
                 </td>
             </tr>
@@ -184,197 +238,214 @@ def popup_html(row):
 
     if not attrs:
         attrs.append(
-            '<tr><td colspan="2" style="padding:8px;">Sin atributos disponibles</td></tr>'
+            """
+            <tr>
+                <td colspan="2" style="padding:8px;">
+                    Sin atributos disponibles
+                </td>
+            </tr>
+            """
         )
 
     return f"""
-    <div style="font-family:Arial,sans-serif;min-width:250px;max-width:420px;">
-        <div style="font-size:15px;font-weight:700;margin-bottom:8px;
-                    color:#12344D;">
-            Información del elemento
+    <div style="
+        font-family:Arial,sans-serif;
+        min-width:260px;
+        max-width:450px;
+    ">
+        <div style="
+            font-size:15px;
+            font-weight:700;
+            color:#12344D;
+            margin-bottom:8px;
+        ">
+            {html.escape(title)}
         </div>
-        <table style="border-collapse:collapse;width:100%;font-size:12px;">
+
+        <table style="
+            border-collapse:collapse;
+            width:100%;
+            font-size:12px;
+        ">
             {''.join(attrs)}
         </table>
     </div>
     """
 
 
-def add_legend(m, selected_layers):
-    """Leyenda HTML fija en el mapa."""
-    items = []
-
-    for item in selected_layers:
-        color = item["color"]
-        geometry = item["geometry"]
-        name = item["name"]
-
-        if geometry == "point":
-            symbol = (
-                f'<span style="display:inline-block;width:11px;height:11px;'
-                f'border-radius:50%;background:{color};border:2px solid white;'
-                f'box-shadow:0 0 0 1px {color};margin-right:7px;"></span>'
-            )
-        elif geometry == "line":
-            symbol = (
-                f'<span style="display:inline-block;width:23px;height:4px;'
-                f'background:{color};margin-right:7px;vertical-align:middle;"></span>'
-            )
-        else:
-            symbol = (
-                f'<span style="display:inline-block;width:15px;height:15px;'
-                f'background:{color}33;border:2px solid {color};'
-                f'margin-right:7px;vertical-align:middle;"></span>'
-            )
-
-        items.append(f"<div style='margin:5px 0;'>{symbol}{html.escape(name)}</div>")
-
-    if not items:
-        items.append(
-            "<div style='color:#666;font-size:12px;'>No hay capas seleccionadas</div>"
-        )
-
-    legend = f"""
-    <div style="
-        position: fixed;
-        bottom: 25px;
-        left: 25px;
-        z-index: 9999;
-        background: rgba(255,255,255,0.96);
-        padding: 13px 16px;
-        border-radius: 10px;
-        box-shadow: 0 2px 12px rgba(0,0,0,.22);
-        min-width: 210px;
-        max-width: 330px;
-        font-family: Arial, sans-serif;
-        font-size: 12px;
-    ">
-        <div style="font-size:14px;font-weight:700;color:#12344D;
-                    border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:7px;">
-            LEYENDA
-        </div>
-        {''.join(items)}
-    </div>
-    """
-
-    macro = MacroElement()
-    macro._template = Template(f"""
-    {{% macro html(this, kwargs) %}}
-    {legend}
-    {{% endmacro %}}
-    """)
-    m.get_root().add_child(macro)
-
-
-def color_for_layer(index, group_key):
-    if group_key == "limite":
-        return "#374151"
-    if group_key == "rio":
-        return "#1677FF"
-    if group_key == "estaciones":
-        return "#E63946"
-    return PALETTE[index % len(PALETTE)]
-
-
-def add_geodata_layer(
+def add_polygon_layer(
     m,
     gdf,
     layer_name,
-    geometry_type,
-    color,
-    opacity,
-    line_width,
-    point_radius,
+    color_offset=0,
 ):
-    """Agrega una capa GeoDataFrame a Folium."""
+    """
+    Dibuja cada polígono de la cuenca con un color diferente.
+    La transparencia queda fija y NO aparece ningún control
+    de transparencia en el sidebar.
+    """
     fg = FeatureGroup(name=layer_name, show=True)
 
-    if gdf.empty:
-        return
+    label_field = get_label_field(gdf)
 
-    # Para mejorar rendimiento en mapas web, se conserva la geometría,
-    # pero se evita enviar columnas innecesarias al tooltip.
-    tooltip_cols = [
-        c for c in gdf.columns
-        if c != "geometry"
-    ][:8]
+    for idx, (_, row) in enumerate(gdf.iterrows()):
+        color = BASIN_COLORS[
+            (color_offset + idx) % len(BASIN_COLORS)
+        ]
 
-    if geometry_type == "point":
-        for _, row in gdf.iterrows():
-            geom = row.geometry
-            if geom is None:
-                continue
+        geom = row.geometry
 
-            # Soporta Point y MultiPoint
-            points = []
-            if geom.geom_type == "Point":
-                points = [geom]
-            elif geom.geom_type == "MultiPoint":
-                points = list(geom.geoms)
+        if geom is None or geom.is_empty:
+            continue
 
-            for point in points:
-                popup = folium.Popup(
-                    popup_html(row),
-                    max_width=450
-                )
+        label = (
+            str(row[label_field])
+            if label_field is not None
+            and not pd.isna(row[label_field])
+            else f"Cuenca {idx + 1}"
+        )
 
-                folium.CircleMarker(
-                    location=[point.y, point.x],
-                    radius=point_radius,
-                    color=color,
-                    weight=2,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=opacity,
-                    popup=popup,
-                    tooltip=layer_name,
-                ).add_to(fg)
-
-    else:
-        style = {
-            "color": color,
-            "weight": line_width if geometry_type == "line" else 1.8,
-            "opacity": opacity,
-            "fillColor": color,
-            "fillOpacity": opacity * 0.20 if geometry_type == "polygon" else 0,
-        }
+        popup = folium.Popup(
+            popup_html(row, title=label),
+            max_width=460,
+        )
 
         folium.GeoJson(
-            gdf.to_json(),
-            name=layer_name,
-            style_function=lambda feature, s=style: s,
-            highlight_function=lambda feature: {
-                "weight": max(s["weight"] + 1.5, 3),
-                "opacity": 1,
-                "fillOpacity": min(s["fillOpacity"] + 0.10, 0.45),
+            geom.__geo_interface__,
+            style_function=lambda feature, c=color: {
+                "color": c,
+                "weight": 1.8,
+                "opacity": 0.95,
+                "fillColor": c,
+                "fillOpacity": 0.32,
             },
-            popup=folium.GeoJsonPopup(
-                fields=tooltip_cols,
-                aliases=tooltip_cols,
-                localize=True,
-                labels=True,
-                sticky=False,
-                max_width=450,
-            ) if tooltip_cols else None,
-            tooltip=folium.GeoJsonTooltip(
-                fields=tooltip_cols[:3],
-                aliases=tooltip_cols[:3],
-                sticky=False,
-            ) if tooltip_cols else None,
+            highlight_function=lambda feature, c=color: {
+                "color": c,
+                "weight": 3.2,
+                "opacity": 1,
+                "fillColor": c,
+                "fillOpacity": 0.48,
+            },
+            popup=popup,
+            tooltip=folium.Tooltip(
+                f"<b>Cuenca:</b> {html.escape(label)}"
+            ),
         ).add_to(fg)
 
     fg.add_to(m)
 
 
+def add_river_layer(
+    m,
+    gdf,
+    layer_name,
+):
+    """Dibuja los ríos."""
+    fg = FeatureGroup(name=layer_name, show=True)
+
+    label_field = get_label_field(gdf)
+
+    tooltip_fields = []
+    if label_field is not None:
+        tooltip_fields = [label_field]
+
+    folium.GeoJson(
+        gdf.to_json(),
+        style_function=lambda feature: {
+            "color": "#1769AA",
+            "weight": 2.5,
+            "opacity": 0.88,
+        },
+        highlight_function=lambda feature: {
+            "color": "#0B4F71",
+            "weight": 4,
+            "opacity": 1,
+        },
+        tooltip=(
+            folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                aliases=["Río:"],
+                sticky=False,
+            )
+            if tooltip_fields
+            else None
+        ),
+    ).add_to(fg)
+
+    fg.add_to(m)
+
+
+def add_station_layer(
+    m,
+    gdf,
+    layer_name,
+    color_offset=0,
+):
+    """
+    Dibuja CADA punto con un color diferente.
+    El color es individual para cada estación/punto,
+    no un solo rojo para todo el shapefile.
+    """
+    fg = FeatureGroup(name=layer_name, show=True)
+
+    label_field = get_label_field(gdf)
+
+    for idx, (_, row) in enumerate(gdf.iterrows()):
+        geom = row.geometry
+
+        if geom is None or geom.is_empty:
+            continue
+
+        color = STATION_COLORS[
+            (color_offset + idx) % len(STATION_COLORS)
+        ]
+
+        if geom.geom_type == "Point":
+            points = [geom]
+        elif geom.geom_type == "MultiPoint":
+            points = list(geom.geoms)
+        else:
+            continue
+
+        label = (
+            str(row[label_field])
+            if label_field is not None
+            and not pd.isna(row[label_field])
+            else f"Punto {idx + 1}"
+        )
+
+        for point in points:
+            folium.CircleMarker(
+                location=[point.y, point.x],
+                radius=6,
+                color="#FFFFFF",
+                weight=2,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.95,
+                popup=folium.Popup(
+                    popup_html(row, title=label),
+                    max_width=460,
+                ),
+                tooltip=folium.Tooltip(
+                    f"<b>Estación:</b> {html.escape(label)}"
+                ),
+            ).add_to(fg)
+
+    fg.add_to(m)
+
+
 def calculate_center(all_gdfs):
-    """Calcula centro del mapa usando las capas disponibles."""
+    """Calcula centro y zoom inicial."""
     bounds = []
 
     for gdf in all_gdfs:
         if gdf is None or gdf.empty:
             continue
+
         try:
             b = gdf.total_bounds
+
             if all(pd.notna(b)):
                 bounds.append(b)
         except Exception:
@@ -388,12 +459,12 @@ def calculate_center(all_gdfs):
     maxx = max(b[2] for b in bounds)
     maxy = max(b[3] for b in bounds)
 
-    center = [(miny + maxy) / 2, (minx + maxx) / 2]
+    center = [
+        (miny + maxy) / 2,
+        (minx + maxx) / 2,
+    ]
 
-    # Zoom inicial razonable para Sudamérica.
-    width = maxx - minx
-    height = maxy - miny
-    extent = max(width, height)
+    extent = max(maxx - minx, maxy - miny)
 
     if extent > 40:
         zoom = 3
@@ -409,163 +480,366 @@ def calculate_center(all_gdfs):
     return center, zoom
 
 
+def create_legend(basin_legend, station_legend, river_present):
+    """
+    Leyenda profesional:
+      - Cuencas: color individual.
+      - Estaciones: color individual.
+      - Ríos: línea azul.
+    """
+    basin_html = ""
+
+    if basin_legend:
+        for item in basin_legend:
+            basin_html += f"""
+            <div style="
+                display:flex;
+                align-items:center;
+                margin:5px 0;
+                line-height:1.2;
+            ">
+                <span style="
+                    display:inline-block;
+                    width:18px;
+                    height:13px;
+                    background:{item['color']};
+                    opacity:0.55;
+                    border:2px solid {item['color']};
+                    margin-right:8px;
+                    flex-shrink:0;
+                "></span>
+                <span>{html.escape(item['label'])}</span>
+            </div>
+            """
+
+    station_html = ""
+
+    if station_legend:
+        for item in station_legend:
+            station_html += f"""
+            <div style="
+                display:flex;
+                align-items:center;
+                margin:5px 0;
+                line-height:1.2;
+            ">
+                <span style="
+                    display:inline-block;
+                    width:11px;
+                    height:11px;
+                    border-radius:50%;
+                    background:{item['color']};
+                    border:2px solid white;
+                    box-shadow:0 0 0 1px {item['color']};
+                    margin-right:8px;
+                    flex-shrink:0;
+                "></span>
+                <span>{html.escape(item['label'])}</span>
+            </div>
+            """
+
+    river_html = ""
+
+    if river_present:
+        river_html = """
+        <div style="
+            display:flex;
+            align-items:center;
+            margin:5px 0;
+        ">
+            <span style="
+                display:inline-block;
+                width:25px;
+                height:4px;
+                background:#1769AA;
+                margin-right:8px;
+            "></span>
+            <span>Ríos</span>
+        </div>
+        """
+
+    if not basin_html and not station_html and not river_html:
+        return
+
+    sections = ""
+
+    if basin_html:
+        sections += f"""
+        <div style="
+            font-size:12px;
+            font-weight:700;
+            color:#12344D;
+            margin:4px 0 7px;
+        ">
+            CUENCAS ANALIZADAS
+        </div>
+        {basin_html}
+        """
+
+    if river_html:
+        sections += f"""
+        <div style="
+            font-size:12px;
+            font-weight:700;
+            color:#12344D;
+            margin:12px 0 7px;
+        ">
+            HIDROGRAFÍA
+        </div>
+        {river_html}
+        """
+
+    if station_html:
+        sections += f"""
+        <div style="
+            font-size:12px;
+            font-weight:700;
+            color:#12344D;
+            margin:12px 0 7px;
+        ">
+            ESTACIONES / PUNTOS
+        </div>
+        {station_html}
+        """
+
+    legend = f"""
+    <div style="
+        position:fixed;
+        bottom:25px;
+        left:25px;
+        z-index:9999;
+        background:rgba(255,255,255,0.97);
+        padding:14px 16px;
+        border-radius:10px;
+        box-shadow:0 3px 16px rgba(0,0,0,0.25);
+        min-width:220px;
+        max-width:330px;
+        max-height:420px;
+        overflow-y:auto;
+        font-family:Arial,sans-serif;
+        font-size:11px;
+        color:#334155;
+    ">
+        <div style="
+            font-size:14px;
+            font-weight:700;
+            color:#12344D;
+            border-bottom:1px solid #DDE3EA;
+            padding-bottom:8px;
+            margin-bottom:9px;
+        ">
+            LEYENDA
+        </div>
+        {sections}
+    </div>
+    """
+
+    macro = MacroElement()
+
+    macro._template = Template(
+        f"""
+        {{% macro html(this, kwargs) %}}
+        {legend}
+        {{% endmacro %}}
+        """
+    )
+
+    return macro
+
+
 # ============================================================
-# ENCABEZADO
+# ESTILOS DE STREAMLIT
 # ============================================================
+
 st.markdown(
     """
     <style>
-        .block-container {
-            padding-top: 1.0rem;
-            padding-bottom: 1rem;
-        }
 
-        .main-title {
-            font-family: Arial, sans-serif;
-            font-size: 30px;
-            font-weight: 750;
-            color: #12344D;
-            margin-bottom: 2px;
-        }
+    .block-container {
+        padding-top: 1.0rem;
+        padding-bottom: 1rem;
+    }
 
-        .subtitle {
-            color: #64748B;
-            font-size: 14px;
-            margin-bottom: 18px;
-        }
+    .main-title {
+        font-family: Arial, sans-serif;
+        font-size: 30px;
+        font-weight: 750;
+        color: #12344D;
+        margin-bottom: 2px;
+    }
 
-        [data-testid="stSidebar"] {
-            background-color: #F7F9FC;
-        }
+    .subtitle {
+        color: #64748B;
+        font-size: 14px;
+        margin-bottom: 18px;
+    }
 
-        .section-title {
-            font-size: 14px;
-            font-weight: 700;
-            color: #12344D;
-            margin-top: 8px;
-            margin-bottom: 6px;
-        }
+    [data-testid="stSidebar"] {
+        background-color: #F7F9FC;
+    }
 
-        .metric-card {
-            background: white;
-            border: 1px solid #E5E7EB;
-            border-radius: 10px;
-            padding: 10px 14px;
-            text-align: center;
-        }
+    .sidebar-section {
+        font-size: 14px;
+        font-weight: 700;
+        color: #12344D;
+    }
+
     </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    <div class="main-title">Visor Hidrológico Sudamérica</div>
+
+# ============================================================
+# TÍTULO
+# ============================================================
+
+st.markdown(
+    """
+    <div class="main-title">
+        Visor Hidrológico Sudamérica
+    </div>
+
     <div class="subtitle">
-        Explorador geoespacial de cuencas, ríos, estaciones y límites territoriales
+        Explorador geoespacial de cuencas, ríos y estaciones hidrológicas
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+
 # ============================================================
-# DESCUBRIR ARCHIVOS
+# BUSCAR ARCHIVOS
 # ============================================================
+
 files = discover_files()
 
 total_files = sum(len(v) for v in files.values())
 
 if total_files == 0:
     st.error(
-        "No se encontraron archivos .shp. "
-        "Verifica que la carpeta data/ esté dentro del repositorio y tenga "
-        "las subcarpetas cuenca/, rio/, estaciones/ y limite/."
+        """
+        No se encontraron archivos .shp.
+
+        Verifica que el repositorio tenga:
+
+        data/cuenca/
+        data/rio/
+        data/estaciones/
+        """
     )
     st.stop()
+
 
 # ============================================================
 # SIDEBAR
 # ============================================================
+
 with st.sidebar:
+
     st.markdown("## Capas del mapa")
-    st.caption("Selecciona las capas que deseas visualizar.")
+
+    st.caption(
+        "Selecciona las capas que deseas visualizar."
+    )
 
     selected = {}
 
-    for group_key, cfg in GROUPS.items():
-        available = files[group_key]
+    # --------------------------------------------------------
+    # CUENCAS
+    # --------------------------------------------------------
+    if files["cuenca"]:
 
-        if not available:
-            continue
+        st.markdown("### Cuencas analizadas")
 
-        st.markdown(f"### {cfg['label']}")
+        for path in files["cuenca"]:
 
-        for i, path in enumerate(available):
-            layer_id = f"{group_key}__{path.as_posix()}"
+            layer_id = (
+                f"cuenca__{path.as_posix()}"
+            )
 
-            default = group_key != "limite"
+            selected[layer_id] = st.checkbox(
+                "Cuencas analizadas"
+                if path.stem.lower() == "1era_salida"
+                else nice_name(path),
+                value=True,
+                key=(
+                    "check_"
+                    + hashlib.md5(
+                        layer_id.encode()
+                    ).hexdigest()
+                ),
+            )
+
+    # --------------------------------------------------------
+    # RÍOS
+    # --------------------------------------------------------
+    if files["rio"]:
+
+        st.markdown("### Ríos")
+
+        for path in files["rio"]:
+
+            layer_id = (
+                f"rio__{path.as_posix()}"
+            )
 
             selected[layer_id] = st.checkbox(
                 nice_name(path),
-                value=default,
-                key=f"check_{hashlib.md5(layer_id.encode()).hexdigest()}",
+                value=True,
+                key=(
+                    "check_"
+                    + hashlib.md5(
+                        layer_id.encode()
+                    ).hexdigest()
+                ),
+            )
+
+    # --------------------------------------------------------
+    # ESTACIONES
+    # --------------------------------------------------------
+    if files["estaciones"]:
+
+        st.markdown("### Estaciones / Puntos")
+
+        for path in files["estaciones"]:
+
+            layer_id = (
+                f"estaciones__{path.as_posix()}"
+            )
+
+            selected[layer_id] = st.checkbox(
+                nice_name(path),
+                value=True,
+                key=(
+                    "check_"
+                    + hashlib.md5(
+                        layer_id.encode()
+                    ).hexdigest()
+                ),
             )
 
     st.divider()
-    st.markdown("### Transparencia")
 
-    polygon_opacity = st.slider(
-        "Cuencas / límites",
-        min_value=0.05,
-        max_value=1.0,
-        value=0.45,
-        step=0.05,
-    )
-
-    line_opacity = st.slider(
-        "Ríos",
-        min_value=0.10,
-        max_value=1.0,
-        value=0.90,
-        step=0.05,
-    )
-
-    point_opacity = st.slider(
-        "Estaciones",
-        min_value=0.10,
-        max_value=1.0,
-        value=0.95,
-        step=0.05,
-    )
-
-    st.markdown("### Simbología")
-
-    line_width = st.slider(
-        "Grosor de ríos",
-        min_value=1.0,
-        max_value=8.0,
-        value=3.0,
-        step=0.5,
-    )
-
-    point_radius = st.slider(
-        "Tamaño de estaciones",
-        min_value=3,
-        max_value=12,
-        value=6,
-        step=1,
-    )
-
-    st.divider()
     st.caption(
-        f"Archivos espaciales encontrados: **{total_files}**"
+        "La simbología y transparencia de las cuencas "
+        "se gestionan automáticamente."
     )
 
+
 # ============================================================
-# CREAR MAPA
+# PRE-CARGAR CAPAS SELECCIONADAS
 # ============================================================
-selected_layers = []
+
 selected_gdfs = []
 
-# Cargar primero todas las capas seleccionadas.
 for group_key, cfg in GROUPS.items():
-    for i, path in enumerate(files[group_key]):
-        layer_id = f"{group_key}__{path.as_posix()}"
+
+    for path in files[group_key]:
+
+        layer_id = (
+            f"{group_key}__{path.as_posix()}"
+        )
 
         if not selected.get(layer_id, False):
             continue
@@ -573,35 +847,21 @@ for group_key, cfg in GROUPS.items():
         try:
             gdf = load_layer(str(path))
 
-            if gdf.empty:
-                continue
-
-            color = color_for_layer(i, group_key)
-
-            if group_key == "limite" or cfg["geometry"] == "polygon":
-                opacity = polygon_opacity
-            elif cfg["geometry"] == "line":
-                opacity = line_opacity
-            else:
-                opacity = point_opacity
-
-            layer_name = f"{cfg['label']}: {nice_name(path)}"
-
-            selected_layers.append(
-                {
-                    "name": layer_name,
-                    "color": color,
-                    "geometry": cfg["geometry"],
-                }
-            )
-            selected_gdfs.append(gdf)
+            if not gdf.empty:
+                selected_gdfs.append(gdf)
 
         except Exception as e:
             st.warning(
-                f"No se pudo leer **{path.name}**: {e}"
+                f"No se pudo leer {path.name}: {e}"
             )
 
+
 center, zoom = calculate_center(selected_gdfs)
+
+
+# ============================================================
+# CREAR MAPA
+# ============================================================
 
 m = folium.Map(
     location=center,
@@ -611,10 +871,12 @@ m = folium.Map(
     tiles=None,
 )
 
+
 # ============================================================
 # MAPAS BASE
 # ============================================================
-# OpenStreetMap
+
+# Mapa callejero
 folium.TileLayer(
     tiles="OpenStreetMap",
     name="Mapa callejero",
@@ -622,72 +884,299 @@ folium.TileLayer(
     show=True,
 ).add_to(m)
 
-# Esri World Imagery = imagen satelital
+
+# Imagen satelital
 folium.TileLayer(
-    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
-          "World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    tiles=(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    ),
     attr="Esri, Maxar, Earthstar Geographics",
     name="Imagen satelital",
     control=True,
     show=False,
 ).add_to(m)
 
-# Esri World Street Map
+
+# Mapa de calles alternativo
 folium.TileLayer(
-    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
-          "World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    tiles=(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+    ),
     attr="Esri",
-    name="Mapa calles",
+    name="Mapa de calles",
     control=True,
     show=False,
 ).add_to(m)
 
-# ============================================================
-# AGREGAR CAPAS
-# ============================================================
-layer_counter = 0
 
-for group_key, cfg in GROUPS.items():
-    for i, path in enumerate(files[group_key]):
-        layer_id = f"{group_key}__{path.as_posix()}"
+# ============================================================
+# DIBUJAR CAPAS
+# ============================================================
 
-        if not selected.get(layer_id, False):
+basin_legend = []
+station_legend = []
+river_present = False
+
+basin_color_index = 0
+station_color_index = 0
+
+
+# ------------------------------------------------------------
+# CUENCAS
+# ------------------------------------------------------------
+
+for path in files["cuenca"]:
+
+    layer_id = (
+        f"cuenca__{path.as_posix()}"
+    )
+
+    if not selected.get(layer_id, False):
+        continue
+
+    try:
+        gdf = load_layer(str(path))
+
+        if gdf.empty:
             continue
 
-        try:
-            gdf = load_layer(str(path))
-            if gdf.empty:
+        label_field = get_label_field(gdf)
+
+        # Nombre de la capa.
+        # 1era_salida -> Cuencas analizadas
+        layer_name = (
+            "Cuencas analizadas"
+            if path.stem.lower() == "1era_salida"
+            else nice_name(path)
+        )
+
+        fg = FeatureGroup(
+            name=layer_name,
+            show=True,
+        )
+
+        for idx, (_, row) in enumerate(
+            gdf.iterrows()
+        ):
+
+            geom = row.geometry
+
+            if geom is None or geom.is_empty:
                 continue
 
-            color = color_for_layer(i, group_key)
+            color = BASIN_COLORS[
+                basin_color_index
+                % len(BASIN_COLORS)
+            ]
 
-            if group_key == "limite" or cfg["geometry"] == "polygon":
-                opacity = polygon_opacity
-            elif cfg["geometry"] == "line":
-                opacity = line_opacity
-            else:
-                opacity = point_opacity
+            basin_color_index += 1
 
-            add_geodata_layer(
-                m=m,
-                gdf=gdf,
-                layer_name=f"{cfg['label']}: {nice_name(path)}",
-                geometry_type=cfg["geometry"],
-                color=color,
-                opacity=opacity,
-                line_width=line_width,
-                point_radius=point_radius,
+            label = (
+                str(row[label_field])
+                if label_field is not None
+                and not pd.isna(row[label_field])
+                else f"Cuenca {idx + 1}"
             )
 
-            layer_counter += 1
+            basin_legend.append(
+                {
+                    "label": label,
+                    "color": color,
+                }
+            )
 
-        except Exception:
-            # El error ya fue mostrado en el bloque anterior.
-            pass
+            folium.GeoJson(
+                geom.__geo_interface__,
+                style_function=(
+                    lambda feature, c=color: {
+                        "color": c,
+                        "weight": 1.8,
+                        "opacity": 0.95,
+                        "fillColor": c,
+                        # Transparencia fija para cuencas.
+                        "fillOpacity": 0.32,
+                    }
+                ),
+                highlight_function=(
+                    lambda feature, c=color: {
+                        "color": c,
+                        "weight": 3.2,
+                        "opacity": 1,
+                        "fillColor": c,
+                        "fillOpacity": 0.48,
+                    }
+                ),
+                popup=folium.Popup(
+                    popup_html(
+                        row,
+                        title=label,
+                    ),
+                    max_width=460,
+                ),
+                tooltip=folium.Tooltip(
+                    f"<b>Cuenca:</b> "
+                    f"{html.escape(label)}"
+                ),
+            ).add_to(fg)
+
+        fg.add_to(m)
+
+    except Exception as e:
+        st.warning(
+            f"No se pudo cargar {path.name}: {e}"
+        )
+
+
+# ------------------------------------------------------------
+# RÍOS
+# ------------------------------------------------------------
+
+for path in files["rio"]:
+
+    layer_id = (
+        f"rio__{path.as_posix()}"
+    )
+
+    if not selected.get(layer_id, False):
+        continue
+
+    try:
+        gdf = load_layer(str(path))
+
+        if gdf.empty:
+            continue
+
+        river_present = True
+
+        add_river_layer(
+            m=m,
+            gdf=gdf,
+            layer_name=nice_name(path),
+        )
+
+    except Exception as e:
+        st.warning(
+            f"No se pudo cargar {path.name}: {e}"
+        )
+
+
+# ------------------------------------------------------------
+# ESTACIONES / PUNTOS
+# ------------------------------------------------------------
+
+for path in files["estaciones"]:
+
+    layer_id = (
+        f"estaciones__{path.as_posix()}"
+    )
+
+    if not selected.get(layer_id, False):
+        continue
+
+    try:
+        gdf = load_layer(str(path))
+
+        if gdf.empty:
+            continue
+
+        label_field = get_label_field(gdf)
+
+        fg = FeatureGroup(
+            name=nice_name(path),
+            show=True,
+        )
+
+        for idx, (_, row) in enumerate(
+            gdf.iterrows()
+        ):
+
+            geom = row.geometry
+
+            if geom is None or geom.is_empty:
+                continue
+
+            if geom.geom_type == "Point":
+                points = [geom]
+            elif geom.geom_type == "MultiPoint":
+                points = list(geom.geoms)
+            else:
+                continue
+
+            color = STATION_COLORS[
+                station_color_index
+                % len(STATION_COLORS)
+            ]
+
+            station_color_index += 1
+
+            label = (
+                str(row[label_field])
+                if label_field is not None
+                and not pd.isna(row[label_field])
+                else f"Punto {idx + 1}"
+            )
+
+            station_legend.append(
+                {
+                    "label": label,
+                    "color": color,
+                }
+            )
+
+            for point in points:
+
+                folium.CircleMarker(
+                    location=[
+                        point.y,
+                        point.x,
+                    ],
+                    radius=6,
+                    color="#FFFFFF",
+                    weight=2,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.95,
+                    popup=folium.Popup(
+                        popup_html(
+                            row,
+                            title=label,
+                        ),
+                        max_width=460,
+                    ),
+                    tooltip=folium.Tooltip(
+                        f"<b>Estación:</b> "
+                        f"{html.escape(label)}"
+                    ),
+                ).add_to(fg)
+
+        fg.add_to(m)
+
+    except Exception as e:
+        st.warning(
+            f"No se pudo cargar {path.name}: {e}"
+        )
+
+
+# ============================================================
+# LEYENDA
+# ============================================================
+
+legend_macro = create_legend(
+    basin_legend=basin_legend,
+    station_legend=station_legend,
+    river_present=river_present,
+)
+
+if legend_macro is not None:
+    m.get_root().add_child(legend_macro)
+
 
 # ============================================================
 # CONTROLES DEL MAPA
 # ============================================================
+
 Fullscreen(
     position="topright",
     title="Pantalla completa",
@@ -705,8 +1194,12 @@ MousePosition(
     position="bottomright",
     separator=" | ",
     prefix="Coordenadas: ",
-    lat_formatter="function(num) {return L.Util.formatNum(num, 5);}",
-    lng_formatter="function(num) {return L.Util.formatNum(num, 5);}",
+    lat_formatter=(
+        "function(num) {return L.Util.formatNum(num, 5);}"
+    ),
+    lng_formatter=(
+        "function(num) {return L.Util.formatNum(num, 5);}"
+    ),
 ).add_to(m)
 
 folium.LayerControl(
@@ -714,74 +1207,15 @@ folium.LayerControl(
     collapsed=False,
 ).add_to(m)
 
-add_legend(m, selected_layers)
 
 # ============================================================
-# INDICADORES
+# MAPA FINAL
 # ============================================================
-c1, c2, c3, c4 = st.columns(4)
 
-with c1:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div style="font-size:12px;color:#64748B;">Capas activas</div>
-            <div style="font-size:23px;font-weight:700;color:#12344D;">
-                {layer_counter}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c2:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div style="font-size:12px;color:#64748B;">Cuencas</div>
-            <div style="font-size:23px;font-weight:700;color:#2563EB;">
-                {len(files["cuenca"])}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c3:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div style="font-size:12px;color:#64748B;">Ríos</div>
-            <div style="font-size:23px;font-weight:700;color:#1677FF;">
-                {len(files["rio"])}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c4:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div style="font-size:12px;color:#64748B;">Estaciones</div>
-            <div style="font-size:23px;font-weight:700;color:#E63946;">
-                {len(files["estaciones"])}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.markdown("")
-
-# ============================================================
-# MAPA
-# ============================================================
 st_folium(
     m,
     width=None,
-    height=720,
+    height=760,
     returned_objects=[],
     use_container_width=True,
 )
