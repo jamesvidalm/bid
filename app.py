@@ -1287,6 +1287,9 @@ def show_station_summary(station_files):
                 unsafe_allow_html=True,
             )
 
+            # Contenedor con altura fija y barra de desplazamiento vertical.
+            # Así las listas largas (por ejemplo BID con 55 estaciones) no
+            # hacen crecer demasiado la página.
             if names:
                 rows_html = []
                 for idx, name in enumerate(names, start=1):
@@ -1295,10 +1298,16 @@ def show_station_summary(station_files):
                     rows_html.append(
                         f'''<div style="display:flex;align-items:flex-start;gap:7px;padding:6px 8px;border-left:1px solid #D9E4EC;border-right:1px solid #D9E4EC;border-bottom:1px solid #D9E4EC;background:{bg};font-family:Arial,sans-serif;font-size:12px;line-height:1.25;color:#334155;"><span style="min-width:22px;color:#5B8EAD;font-weight:700;">{idx}.</span><span style="word-break:break-word;">{safe_name}</span></div>'''
                     )
-                st.markdown("".join(rows_html), unsafe_allow_html=True)
+
+                list_html = "".join(rows_html)
+
+                st.markdown(
+                    f'''<div style="height:390px;overflow-y:auto;overflow-x:hidden;border:1px solid #D9E4EC;border-top:0;border-radius:0 0 7px 7px;background:white;scrollbar-width:thin;scrollbar-color:#8AAEC2 #EEF4F8;">{list_html}</div>''',
+                    unsafe_allow_html=True,
+                )
             else:
                 st.markdown(
-                    '''<div style="padding:10px 8px;border:1px solid #D9E4EC;border-top:0;border-radius:0 0 7px 7px;background:#F8FAFC;color:#64748B;font-family:Arial,sans-serif;font-size:12px;text-align:center;">Sin estaciones</div>''',
+                    '''<div style="height:390px;display:flex;align-items:center;justify-content:center;padding:10px 8px;border:1px solid #D9E4EC;border-top:0;border-radius:0 0 7px 7px;background:#F8FAFC;color:#64748B;font-family:Arial,sans-serif;font-size:12px;text-align:center;">Sin estaciones</div>''',
                     unsafe_allow_html=True,
                 )
 
