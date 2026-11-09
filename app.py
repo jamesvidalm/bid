@@ -1305,3 +1305,189 @@ if estacion_sel is not None:
                     [[by1, bx1], [by2, bx2]],
                     padding=(30, 30)
                 )
+
+            # Estación seleccionada.
+            folium.CircleMarker(
+                location=[est["lat"], est["lon"]],
+                radius=8,
+                color="#FFFFFF",
+                weight=2,
+                fill=True,
+                fill_color=COLOR_ESTACION_ACTIVA,
+                fill_opacity=1,
+                tooltip=f"{est['codigo']} — {est['nombre']}",
+            ).add_to(mapa)
+
+            Fullscreen(position="topleft").add_to(mapa)
+
+            folium.LayerControl(collapsed=True).add_to(mapa)
+
+            html_mapa = mapa.get_root().render()
+
+            components.html(html_mapa, height=620, scrolling=False)
+
+        # ---------------- CARACTERÍSTICAS ----------------
+
+        with col_info:
+
+            st.markdown("#### Características de la cuenca")
+
+            with st.container(border=True):
+
+                st.markdown(f"**País**  \n{est['pais']}")
+                st.markdown(f"**Código de la estación**  \n{est['codigo']}")
+                st.markdown(f"**Nombre de la estación**  \n{est['nombre']}")
+
+                if area_km2 is not None:
+                    st.metric("Área de la cuenca", f"{area_km2:,.2f} km²")
+                else:
+                    st.warning(
+                        "No se encontró una subcuenca para esta estación."
+                    )
+
+                st.caption(
+                    f"Coordenadas: {est['lat']:.5f}, {est['lon']:.5f}"
+                )
+
+            # Avisos de coherencia.
+            if poligono is not None:
+
+                if metodo != "Por código de estación":
+                    st.warning(
+                        "No hay un archivo de subcuenca con el código "
+                        f"{est['codigo']}. La cuenca se asignó por "
+                        "ubicación; verifica que sea correcta."
+                    )
+
+                if (
+                    dist_borde is not None
+                    and dist_borde * 111 > TOL_AVISO_KM
+                ):
+                    st.warning(
+                        "La estación no está sobre el borde (salida) de "
+                        "esta cuenca. Revisa si el archivo de subcuenca "
+                        "corresponde a la estación."
+                    )
+
+            if not rio_propio:
+                st.warning(
+                    "No se encontró el río de esta cuenca en la carpeta "
+                    "'rios_subcuencas' (se esperaba un archivo con el "
+                    "mismo nombre y sufijo _RIO)."
+                )
+
+            with st.expander("Detalle del proceso", expanded=True):
+
+                for p in pasos:
+                    st.write(p)
+
+    except Exception as exc:
+
+        st.error("Ocurrió un error al cargar la cuenca de esta estación:")
+        st.exception(exc)
+
+
+# ============================================================
+# 13. VERIFICACIÓN DE TODAS LAS ESTACIONES
+# ============================================================
+
+st.divider()
+
+with st.expander("Verificar asociación estación → cuenca → río"):
+
+    st.caption(
+        "Muestra a qué subcuenca y a qué río se asigna cada estación. "
+        "Las filas con ⚠️ se asignaron por ubicación, quedan lejos de "
+        "la salida de la cuenca o no tienen archivo de río."
+    )
+
+    if st.checkbox("Calcular tabla de verificación"):
+
+        filas = []
+
+        for e in sorted(estaciones, key=lambda x: x["codigo"]):
+
+            try:
+
+                cuenca_e, metodo_e, dist_e = buscar_cuenca_estacion(
+                    e,
+                    capas_subcuencas
+                )
+
+            except Exception as exc:
+
+                cuenca_e, metodo_e, dist_e = None, f"Error: {exc}", None
+
+            dist_km = (
+                round(dist_e * 111, 1)
+                if dist_e is not None
+                else None
+            )
+
+            rios_e, _ = buscar_rio_de_cuenca(cuenca_e, e, capas_rios_sub)
+
+            revisar = (
+                cuenca_e is None
+                or metodo_e != "Por código de estación"
+                or (dist_km is not None and dist_km > TOL_AVISO_KM)
+                or not rios_e
+            )
+
+            filas.append(
+                {
+                    "Revisar": "⚠️" if revisar else "✔",
+                    "Código estación": e["codigo"],
+                    "Nombre": e["nombre"],
+                    "País": e["pais"],
+                    "Subcuenca asignada": (
+                        nombre_corto(cuenca_e[0])
+                        if cuenca_e is not None
+                        else "—"
+                    ),
+                    "Río asignado": (
+                        ", ".join(nombre_corto(n) for n, _ in rios_e)
+                        if rios_e
+                        else "—"
+                    ),
+                    "Método": metodo_e,
+                    "Dist. al borde (km)": dist_km,
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(filas),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with st.expander("Archivos detectados"):
+
+        st.write(
+            "**Subcuencas:** "
+            + (
+                ", ".join(nombre_corto(n) for n, _ in capas_subcuencas)
+                or "Ninguno"
+            )
+        )
+
+        st.write(
+            "**Ríos de subcuencas:** "
+            + (
+                ", ".join(nombre_corto(n) for n, _ in capas_rios_sub)
+                or "Ninguno"
+            )
+        )
+
+
+# ============================================================
+# 14. DIAGNÓSTICO
+# ============================================================
+
+if errores:
+
+    with st.expander(f"Errores de lectura ({len(errores)})"):
+
+        for error in errores:
+            st.write(error)
+
+st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
