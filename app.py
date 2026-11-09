@@ -30,7 +30,7 @@ import warnings
 
 import streamlit as st
 import geopandas as gpd
-import fiona
+import pyogrio
 import folium
 from folium.plugins import Fullscreen, MousePosition, MiniMap
 from streamlit_folium import st_folium
@@ -108,7 +108,7 @@ def leer_vector(ruta, fecha_modificacion):
 
     elif ruta.suffix.lower() == ".gpkg":
         try:
-            nombres_capas = fiona.listlayers(ruta)
+            nombres_capas = [str(nombre) for nombre in pyogrio.list_layers(ruta)[:, 0]]
             for nombre_capa in nombres_capas:
                 try:
                     gdf = gpd.read_file(ruta, layer=nombre_capa)
