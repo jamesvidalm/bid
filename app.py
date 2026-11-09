@@ -51,16 +51,14 @@ CARPETAS = {
 PAISES_MAP = {
     "ECUADOR": "Ecuador",
     "PERU": "Perú",
-    "BOLIVIA": "Bolivia",
 }
 
-PAISES_LISTA = ["Ecuador", "Perú", "Bolivia"]
+PAISES_LISTA = ["Ecuador", "Perú"]
 SIN_PAIS = "Sin país asignado"
 
 COLORES_PAIS = {
-    "Ecuador": "#F7E3A1",
-    "Perú": "#F4B9AC",
-    "Bolivia": "#BFDDA6",
+    "Ecuador": "#555555",
+    "Perú": "#555555",
 }
 
 COLOR_CUENCA_ACTIVA = "#FFC400"
@@ -336,7 +334,7 @@ def detectar_columna_pais(gdf):
 
 @st.cache_resource(show_spinner=False, max_entries=4)
 def construir_paises(clave, _capas_sud):
-    """Une los polígonos de Ecuador, Perú y Bolivia (uno por país)."""
+    """Une los polígonos de Ecuador y Perú (uno por país)."""
 
     partes = []
 
@@ -799,7 +797,7 @@ def mapa_estatico(
         try:
             gdf.plot(
                 ax=ax,
-                facecolor="#F1F0EA",
+                facecolor="none",
                 edgecolor="#A7A79F",
                 linewidth=0.4,
             )
@@ -816,9 +814,9 @@ def mapa_estatico(
                     crs="EPSG:4326"
                 ).plot(
                     ax=ax,
-                    facecolor=COLORES_PAIS.get(fila["pais"], "#DDDDDD"),
+                    facecolor="none",
                     edgecolor="#555555",
-                    linewidth=0.9,
+                    linewidth=1.2,
                 )
             except Exception:
                 pass
@@ -910,17 +908,14 @@ def mapa_estatico(
     ax.set_ylabel("Latitud", fontsize=8)
 
     ax.set_title(
-        "Cuencas Andino-Amazónicas de Ecuador, Perú y Bolivia",
+        "Cuencas Andino-Amazónicas de Ecuador y Perú",
         fontsize=12,
         fontweight="bold",
     )
 
     leyenda = [
-        Patch(facecolor=COLORES_PAIS["Ecuador"], edgecolor="#555", label="Ecuador"),
-        Patch(facecolor=COLORES_PAIS["Perú"], edgecolor="#555", label="Perú"),
-        Patch(facecolor=COLORES_PAIS["Bolivia"], edgecolor="#555", label="Bolivia"),
-        Patch(facecolor="#C9B6D9", edgecolor="#555", alpha=0.7,
-              label="Subcuencas (color por polígono)"),
+        Patch(facecolor="none", edgecolor="#555", linewidth=1.2, label="Ecuador"),
+        Patch(facecolor="none", edgecolor="#555", linewidth=1.2, label="Perú"),
         Line2D([0], [0], color="#2E86C1", linewidth=1.2, label="Ríos"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#D9534F",
                markeredgecolor="white", markersize=7, label="Estaciones"),
@@ -948,11 +943,11 @@ def mapa_estatico(
 
 st.title(
     "Modelamiento Hidrológico de las Cuencas "
-    "Andino-Amazónicas de Ecuador, Perú y Bolivia"
+    "Andino-Amazónicas de Ecuador y Perú"
 )
 
 st.caption(
-    "Ecuador · Perú · Bolivia | "
+    "Ecuador · Perú | "
     "Estaciones, subcuencas y red hidrográfica"
 )
 
@@ -962,13 +957,6 @@ ver_satelite = st.sidebar.checkbox(
     "Google Satélite en el mapa de cuenca",
     value=True
 )
-
-if st.sidebar.button("Recargar archivos", use_container_width=True):
-
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.rerun()
-
 
 # ============================================================
 # 8. CARGAR DATOS
@@ -1010,12 +998,11 @@ conteo[SIN_PAIS] = 0
 for e in estaciones:
     conteo[e["pais"]] = conteo.get(e["pais"], 0) + 1
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3 = st.columns(3)
 
 m1.metric("Estaciones totales", len(estaciones))
 m2.metric("Ecuador", conteo["Ecuador"])
 m3.metric("Perú", conteo["Perú"])
-m4.metric("Bolivia", conteo["Bolivia"])
 
 if paises_gdf.empty:
     st.warning(
@@ -1034,8 +1021,6 @@ if not capas_rios_sub:
 # ============================================================
 # 10. MAPA GENERAL (ESTÁTICO)
 # ============================================================
-
-st.subheader("Mapa general")
 
 with st.spinner("Generando mapa general..."):
 
@@ -1072,7 +1057,7 @@ with col_a:
         "1. Selecciona el país",
         opciones_pais,
         index=None,
-        placeholder="Ecuador, Perú o Bolivia",
+        placeholder="Ecuador o Perú",
         key="pais_sel",
     )
 
@@ -1388,98 +1373,6 @@ if estacion_sel is not None:
 
 
 # ============================================================
-# 13. VERIFICACIÓN DE TODAS LAS ESTACIONES
-# ============================================================
-
-st.divider()
-
-with st.expander("Verificar asociación estación → cuenca → río"):
-
-    st.caption(
-        "Muestra a qué subcuenca y a qué río se asigna cada estación. "
-        "Las filas con ⚠️ se asignaron por ubicación, quedan lejos de "
-        "la salida de la cuenca o no tienen archivo de río."
-    )
-
-    if st.checkbox("Calcular tabla de verificación"):
-
-        filas = []
-
-        for e in sorted(estaciones, key=lambda x: x["codigo"]):
-
-            try:
-
-                cuenca_e, metodo_e, dist_e = buscar_cuenca_estacion(
-                    e,
-                    capas_subcuencas
-                )
-
-            except Exception as exc:
-
-                cuenca_e, metodo_e, dist_e = None, f"Error: {exc}", None
-
-            dist_km = (
-                round(dist_e * 111, 1)
-                if dist_e is not None
-                else None
-            )
-
-            rios_e, _ = buscar_rio_de_cuenca(cuenca_e, e, capas_rios_sub)
-
-            revisar = (
-                cuenca_e is None
-                or metodo_e != "Por código de estación"
-                or (dist_km is not None and dist_km > TOL_AVISO_KM)
-                or not rios_e
-            )
-
-            filas.append(
-                {
-                    "Revisar": "⚠️" if revisar else "✔",
-                    "Código estación": e["codigo"],
-                    "Nombre": e["nombre"],
-                    "País": e["pais"],
-                    "Subcuenca asignada": (
-                        nombre_corto(cuenca_e[0])
-                        if cuenca_e is not None
-                        else "—"
-                    ),
-                    "Río asignado": (
-                        ", ".join(nombre_corto(n) for n, _ in rios_e)
-                        if rios_e
-                        else "—"
-                    ),
-                    "Método": metodo_e,
-                    "Dist. al borde (km)": dist_km,
-                }
-            )
-
-        st.dataframe(
-            pd.DataFrame(filas),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander("Archivos detectados"):
-
-        st.write(
-            "**Subcuencas:** "
-            + (
-                ", ".join(nombre_corto(n) for n, _ in capas_subcuencas)
-                or "Ninguno"
-            )
-        )
-
-        st.write(
-            "**Ríos de subcuencas:** "
-            + (
-                ", ".join(nombre_corto(n) for n, _ in capas_rios_sub)
-                or "Ninguno"
-            )
-        )
-
-
-# ============================================================
 # 14. DIAGNÓSTICO
 # ============================================================
 
@@ -1490,4 +1383,4 @@ if errores:
         for error in errores:
             st.write(error)
 
-st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
+st.caption("Visor Hidrológico BID | Ecuador · Perú")
