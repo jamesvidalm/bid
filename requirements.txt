@@ -4,3 +4,4 @@ pyogrio
 folium
 streamlit-folium
 shapely
+pyarrow<25
