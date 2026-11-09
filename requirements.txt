@@ -1,9 +1,0 @@
-streamlit>=1.40,<2.0
-geopandas>=1.0,<2.0
-pyogrio>=0.10
-shapely>=2.0
-pyproj>=3.6
-folium>=0.17
-streamlit-folium>=0.24
-branca>=0.8
-pandas>=2.0
