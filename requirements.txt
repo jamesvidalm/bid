@@ -4,4 +4,5 @@ pyogrio
 folium
 streamlit-folium
 shapely
+matplotlib
 pyarrow<25
