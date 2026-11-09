@@ -9,6 +9,7 @@ import unicodedata
 import warnings
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import geopandas as gpd
 import pyogrio
@@ -23,7 +24,6 @@ from matplotlib.lines import Line2D
 
 from shapely.geometry import Point
 from folium.plugins import Fullscreen
-from streamlit_folium import st_folium
 
 warnings.filterwarnings("ignore")
 
@@ -67,8 +67,6 @@ COLOR_BORDE_ACTIVO = "#FFFFFF"
 COLOR_RIO_ACTIVO = "#00BFFF"
 COLOR_ESTACION_ACTIVA = "#FFD000"
 
-# Nombres posibles de columnas (sin tildes, mayúsculas, sin símbolos).
-# Si tus shapes usan otros nombres, agrégalos aquí.
 CANDIDATOS_NOMBRE = [
     "ESTACION", "NOMBRE", "NAME", "NOMBREESTACION", "NOMESTACION",
     "NOMEST", "NOM", "STATION", "ESTNOMBRE",
@@ -226,8 +224,8 @@ def preparar_archivo(ruta, capa, modificacion, tipo):
 
     geom_col = gdf.geometry.name
 
-    # Puntos y Sudamérica conservan todos sus atributos
-    # (código, nombre, país). Ríos y subcuencas solo geometría.
+    # Puntos y Sudamérica conservan atributos (código, nombre, país).
+    # Ríos y subcuencas solo geometría.
     if tipo in ("puntos", "sudamerica"):
         gdf = gdf.copy()
     else:
@@ -298,7 +296,7 @@ def cargar_carpeta(tipo):
 
 
 # ============================================================
-# 4. PAÍSES (A PARTIR DEL SHAPE DE SUDAMÉRICA) Y ESTACIONES
+# 4. PAÍSES Y ESTACIONES
 # ============================================================
 
 def detectar_columna_pais(gdf):
@@ -505,12 +503,6 @@ def buscar_cuenca(lat, lon, capas_subcuencas):
     return None
 
 
-@st.cache_data(show_spinner=False, max_entries=100)
-def cuenca_de_estacion(lat, lon, clave, _capas_sub):
-
-    return buscar_cuenca(lat, lon, _capas_sub)
-
-
 def obtener_poligono(seleccion, capas_subcuencas):
 
     if seleccion is None:
@@ -537,21 +529,15 @@ def calcular_area_km2(poligono):
         return None
 
 
-@st.cache_data(show_spinner=False, max_entries=50)
-def rios_de_cuenca(nombre_sel, indice_sel, clave, _capas_sub, _capas_rios):
+def rios_de_cuenca(poligono, capas_rios):
     """Tramos de río dentro de la cuenca, como lista de GeoJSON."""
-
-    poligono = obtener_poligono(
-        (nombre_sel, indice_sel),
-        _capas_sub
-    )
 
     resultado = []
 
     if poligono is None:
         return resultado
 
-    for nombre, gdf in _capas_rios:
+    for nombre, gdf in capas_rios:
 
         try:
 
@@ -624,7 +610,6 @@ def mapa_estatico(
 
     ax.set_facecolor("#D6E6F2")
 
-    # Sudamérica de fondo.
     for _, gdf in _capas_sud:
         try:
             gdf.plot(
@@ -636,7 +621,6 @@ def mapa_estatico(
         except Exception:
             pass
 
-    # Países de estudio resaltados.
     if _paises is not None and not _paises.empty:
 
         for _, fila in _paises.iterrows():
@@ -654,7 +638,6 @@ def mapa_estatico(
             except Exception:
                 pass
 
-    # Subcuencas, un color por polígono.
     for nombre, gdf in _capas_sub:
 
         try:
@@ -679,14 +662,12 @@ def mapa_estatico(
         except Exception:
             pass
 
-    # Ríos.
     for _, gdf in _capas_rios:
         try:
             gdf.plot(ax=ax, color="#2E86C1", linewidth=0.35)
         except Exception:
             pass
 
-    # Estaciones.
     if _estaciones:
         ax.scatter(
             [e["lon"] for e in _estaciones],
@@ -698,7 +679,6 @@ def mapa_estatico(
             zorder=5,
         )
 
-    # Etiquetas de país.
     if _paises is not None and not _paises.empty:
 
         for _, fila in _paises.iterrows():
@@ -720,7 +700,6 @@ def mapa_estatico(
             except Exception:
                 pass
 
-    # Extensión.
     try:
 
         if _paises is not None and not _paises.empty:
@@ -794,7 +773,10 @@ st.caption(
 
 st.sidebar.title("Opciones")
 
-ver_satelite = st.sidebar.checkbox("Google Satélite en el mapa de cuenca", value=True)
+ver_satelite = st.sidebar.checkbox(
+    "Google Satélite en el mapa de cuenca",
+    value=True
+)
 
 if st.sidebar.button("Recargar archivos", use_container_width=True):
 
@@ -947,4 +929,214 @@ elif estacion_sel is None:
 
 # ============================================================
 # 12. CUENCA DE LA ESTACIÓN: MAPA (IZQ.) + CARACTERÍSTICAS (DER.)
-# ============================================
+# ============================================================
+
+if estacion_sel is not None:
+
+    try:
+
+        est = estaciones_por_clave[estacion_sel]
+
+        pasos = []
+
+        pasos.append(
+            f"Estación: {est['codigo']} — {est['nombre']} "
+            f"({est['lat']:.5f}, {est['lon']:.5f})"
+        )
+
+        # --- Buscar subcuenca ---
+        cuenca = buscar_cuenca(
+            est["lat"],
+            est["lon"],
+            capas_subcuencas
+        )
+
+        poligono = obtener_poligono(cuenca, capas_subcuencas)
+
+        if poligono is not None:
+            pasos.append(f"Subcuenca encontrada en: {cuenca[0]} (fila {cuenca[1]})")
+        else:
+            pasos.append("No se encontró subcuenca cercana a la estación.")
+
+        # --- Área ---
+        area_km2 = (
+            calcular_area_km2(poligono)
+            if poligono is not None
+            else None
+        )
+
+        # --- Ríos de la cuenca ---
+        lista_rios = []
+
+        if poligono is not None:
+            lista_rios = rios_de_cuenca(poligono, capas_rios)
+
+        pasos.append(f"Capas de ríos con tramos en la cuenca: {len(lista_rios)}")
+
+        col_mapa, col_info = st.columns([3, 2])
+
+        # ---------------- MAPA ----------------
+
+        with col_mapa:
+
+            mapa = folium.Map(
+                location=[est["lat"], est["lon"]],
+                zoom_start=10,
+                tiles=None,
+                control_scale=True
+            )
+
+            folium.TileLayer(
+                tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+                attr="Google Satellite",
+                name="Google Satélite",
+                overlay=False,
+                show=ver_satelite,
+                max_zoom=20
+            ).add_to(mapa)
+
+            folium.TileLayer(
+                "OpenStreetMap",
+                name="OpenStreetMap",
+                overlay=False,
+                show=not ver_satelite
+            ).add_to(mapa)
+
+            if poligono is not None:
+
+                texto_area = (
+                    f"Área: {area_km2:,.2f} km²"
+                    if area_km2 is not None
+                    else "Cuenca"
+                )
+
+                feature = {
+                    "type": "Feature",
+                    "geometry": poligono.__geo_interface__,
+                    "properties": {},
+                }
+
+                grupo_cuenca = folium.FeatureGroup(
+                    name="Cuenca",
+                    show=True
+                )
+
+                # Halo blanco.
+                folium.GeoJson(
+                    feature,
+                    style_function=lambda f: {
+                        "color": COLOR_BORDE_ACTIVO,
+                        "weight": 9,
+                        "opacity": 0.35,
+                        "fillOpacity": 0,
+                    },
+                ).add_to(grupo_cuenca)
+
+                # Relleno dorado.
+                folium.GeoJson(
+                    feature,
+                    style_function=lambda f: {
+                        "color": COLOR_BORDE_ACTIVO,
+                        "weight": 3,
+                        "opacity": 1,
+                        "fillColor": COLOR_CUENCA_ACTIVA,
+                        "fillOpacity": 0.40,
+                    },
+                    tooltip=texto_area,
+                ).add_to(grupo_cuenca)
+
+                grupo_cuenca.add_to(mapa)
+
+                # Ríos dentro de la cuenca.
+                grupo_rios = folium.FeatureGroup(
+                    name="Ríos de la cuenca",
+                    show=True
+                )
+
+                for geojson in lista_rios:
+
+                    folium.GeoJson(
+                        geojson,
+                        style_function=lambda f: {
+                            "color": COLOR_RIO_ACTIVO,
+                            "weight": 3,
+                            "opacity": 1,
+                        },
+                    ).add_to(grupo_rios)
+
+                grupo_rios.add_to(mapa)
+
+                bx1, by1, bx2, by2 = poligono.bounds
+
+                mapa.fit_bounds(
+                    [[by1, bx1], [by2, bx2]],
+                    padding=(30, 30)
+                )
+
+            # Estación seleccionada.
+            folium.CircleMarker(
+                location=[est["lat"], est["lon"]],
+                radius=8,
+                color="#FFFFFF",
+                weight=2,
+                fill=True,
+                fill_color=COLOR_ESTACION_ACTIVA,
+                fill_opacity=1,
+                tooltip=f"{est['codigo']} — {est['nombre']}",
+            ).add_to(mapa)
+
+            Fullscreen(position="topleft").add_to(mapa)
+
+            folium.LayerControl(collapsed=True).add_to(mapa)
+
+            # Se inserta como HTML (más estable que st_folium).
+            html_mapa = mapa.get_root().render()
+
+            components.html(html_mapa, height=620, scrolling=False)
+
+        # ---------------- CARACTERÍSTICAS ----------------
+
+        with col_info:
+
+            st.markdown("#### Características de la cuenca")
+
+            with st.container(border=True):
+
+                st.markdown(f"**País**  \n{est['pais']}")
+                st.markdown(f"**Código de la estación**  \n{est['codigo']}")
+                st.markdown(f"**Nombre de la estación**  \n{est['nombre']}")
+
+                if area_km2 is not None:
+                    st.metric("Área de la cuenca", f"{area_km2:,.2f} km²")
+                else:
+                    st.warning(
+                        "No se encontró una subcuenca para esta estación."
+                    )
+
+                st.caption(
+                    f"Coordenadas: {est['lat']:.5f}, {est['lon']:.5f}"
+                )
+
+            with st.expander("Detalle del proceso"):
+
+                for p in pasos:
+                    st.write(p)
+
+    except Exception as exc:
+
+        st.error("Ocurrió un error al cargar la cuenca de esta estación:")
+        st.exception(exc)
+
+
+# ============================================================
+# 13. DIAGNÓSTICO
+# ============================================================
+
+if errores:
+
+    with st.expander(f"Errores de lectura ({len(errores)})"):
+
+        for error in errores:
+            st.write(error)
+
+st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
