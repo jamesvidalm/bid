@@ -1,14 +1,25 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+from io import BytesIO
 import colorsys
 import hashlib
+import re
+import unicodedata
 import warnings
 
 import streamlit as st
+import pandas as pd
 import geopandas as gpd
 import pyogrio
 import folium
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 from shapely.geometry import Point
 from folium.plugins import Fullscreen
@@ -24,7 +35,7 @@ st.set_page_config(
     page_title="Visor Hidrológico BID",
     page_icon="🌎",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -36,25 +47,117 @@ CARPETAS = {
     "sudamerica": ROOT / "sudamerica",
 }
 
+PAISES_MAP = {
+    "ECUADOR": "Ecuador",
+    "PERU": "Perú",
+    "BOLIVIA": "Bolivia",
+}
+
+PAISES_LISTA = ["Ecuador", "Perú", "Bolivia"]
+SIN_PAIS = "Sin país asignado"
+
+COLORES_PAIS = {
+    "Ecuador": "#F7E3A1",
+    "Perú": "#F4B9AC",
+    "Bolivia": "#BFDDA6",
+}
+
 COLOR_CUENCA_ACTIVA = "#FFC400"
 COLOR_BORDE_ACTIVO = "#FFFFFF"
 COLOR_RIO_ACTIVO = "#00BFFF"
-COLOR_RIO_NORMAL = "#8FB9C9"
-COLOR_ESTACION = "#D9534F"
 COLOR_ESTACION_ACTIVA = "#FFD000"
 
-CAMPOS_NOMBRE = [
-    "Estacion", "ESTACION", "estacion",
-    "Nombre", "NOMBRE", "nombre",
-    "Codigo", "CODIGO", "codigo",
+# Nombres posibles de columnas (sin tildes, mayúsculas, sin símbolos).
+# Si tus shapes usan otros nombres, agrégalos aquí.
+CANDIDATOS_NOMBRE = [
+    "ESTACION", "NOMBRE", "NAME", "NOMBREESTACION", "NOMESTACION",
+    "NOMEST", "NOM", "STATION", "ESTNOMBRE",
 ]
 
-# Proyección de área equivalente para calcular superficies.
+CANDIDATOS_CODIGO = [
+    "CODIGO", "COD", "CODE", "CODESTACION", "CODIGOESTACION",
+    "CODEST", "IDESTACION", "ID", "IDE", "CODIGOEST",
+]
+
 CRS_AREA = "EPSG:6933"
 
 
 # ============================================================
-# 2. FUNCIONES DE ARCHIVOS
+# 2. UTILIDADES
+# ============================================================
+
+def normalizar(texto):
+
+    t = unicodedata.normalize("NFKD", str(texto))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+
+    return t.upper().strip()
+
+
+def normalizar_columna(texto):
+
+    return re.sub(r"[^A-Z0-9]", "", normalizar(texto))
+
+
+def pais_desde_texto(valor):
+
+    n = normalizar(valor)
+
+    for clave, nombre in PAISES_MAP.items():
+        if clave in n:
+            return nombre
+
+    return None
+
+
+def buscar_columna(gdf, candidatos):
+
+    geom_col = gdf.geometry.name
+
+    mapa = {
+        normalizar_columna(c): c
+        for c in gdf.columns
+        if c != geom_col
+    }
+
+    for cand in candidatos:
+        if cand in mapa:
+            return mapa[cand]
+
+    return None
+
+
+def limpiar_valor(valor):
+
+    texto = str(valor).strip()
+
+    if texto == "" or texto.lower() in ("none", "nan", "nat", "<na>"):
+        return "S/D"
+
+    return texto
+
+
+def color_por_indice(i, desplazamiento=0):
+    """Color distinto por polígono (espaciado por proporción áurea)."""
+
+    hue = ((i + desplazamiento) * 0.61803398875) % 1.0
+    sat = 0.50 + 0.18 * ((i * 7) % 3) / 2
+    val = 0.88 - 0.10 * ((i * 5) % 3) / 2
+
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+
+    return "#{:02X}{:02X}{:02X}".format(
+        int(r * 255), int(g * 255), int(b * 255)
+    )
+
+
+def firma(capas):
+
+    return "|".join(f"{n}:{len(g)}" for n, g in capas)
+
+
+# ============================================================
+# 3. LECTURA DE ARCHIVOS
 # ============================================================
 
 def buscar_archivos(carpeta):
@@ -69,20 +172,6 @@ def buscar_archivos(carpeta):
             and p.suffix.lower() in (".shp", ".gpkg")
         ],
         key=lambda p: str(p).lower()
-    )
-
-
-def color_por_indice(i, desplazamiento=0):
-    """Color distinto por polígono (espaciado por proporción áurea)."""
-
-    hue = ((i + desplazamiento) * 0.61803398875) % 1.0
-    sat = 0.50 + 0.18 * ((i * 7) % 3) / 2
-    val = 0.88 - 0.10 * ((i * 5) % 3) / 2
-
-    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-
-    return "#{:02X}{:02X}{:02X}".format(
-        int(r * 255), int(g * 255), int(b * 255)
     )
 
 
@@ -137,46 +226,14 @@ def preparar_archivo(ruta, capa, modificacion, tipo):
 
     geom_col = gdf.geometry.name
 
-    atributos = [
-        c for c in gdf.columns
-        if c != geom_col
-    ][:3]
-
-    gdf = gdf[atributos + [geom_col]].copy()
+    # Puntos y Sudamérica conservan todos sus atributos
+    # (código, nombre, país). Ríos y subcuencas solo geometría.
+    if tipo in ("puntos", "sudamerica"):
+        gdf = gdf.copy()
+    else:
+        gdf = gdf[[geom_col]].copy()
 
     return gdf.reset_index(drop=True)
-
-
-@st.cache_resource(show_spinner=False, max_entries=120)
-def geojson_capa(tipo, nombre, _gdf):
-    """GeoJSON (solo geometría) cacheado, coordenadas redondeadas.
-    Para subcuencas añade una propiedad 'color' distinta por polígono."""
-
-    geom_col = _gdf.geometry.name
-    solo_geom = _gdf[[geom_col]].copy()
-
-    try:
-        solo_geom.geometry = solo_geom.geometry.set_precision(
-            grid_size=0.00001
-        )
-        solo_geom = solo_geom[~solo_geom.geometry.is_empty]
-    except Exception:
-        pass
-
-    if tipo == "subcuencas":
-
-        desplazamiento = int(
-            hashlib.md5(nombre.encode("utf-8")).hexdigest()[:4], 16
-        ) % 997
-
-        solo_geom = solo_geom.reset_index(drop=True)
-
-        solo_geom["color"] = [
-            color_por_indice(i, desplazamiento)
-            for i in range(len(solo_geom))
-        ]
-
-    return solo_geom.to_json(drop_id=True)
 
 
 def cargar_carpeta(tipo):
@@ -241,34 +298,158 @@ def cargar_carpeta(tipo):
 
 
 # ============================================================
-# 3. FUNCIONES GEOGRÁFICAS
+# 4. PAÍSES (A PARTIR DEL SHAPE DE SUDAMÉRICA) Y ESTACIONES
 # ============================================================
 
-def buscar_estacion(lat, lon, capas_puntos):
+def detectar_columna_pais(gdf):
 
-    punto = Point(lon, lat)
+    geom_col = gdf.geometry.name
 
-    mejor = None
-    distancia_minima = float("inf")
+    for c in gdf.columns:
 
-    for nombre, gdf in capas_puntos:
+        if c == geom_col:
+            continue
 
-        for indice, geom in enumerate(gdf.geometry):
+        if pd.api.types.is_numeric_dtype(gdf[c]):
+            continue
+
+        try:
+            valores = gdf[c].dropna().astype(str).unique()[:3000]
+        except Exception:
+            continue
+
+        if any(pais_desde_texto(v) for v in valores):
+            return c
+
+    return None
+
+
+@st.cache_resource(show_spinner=False, max_entries=4)
+def construir_paises(clave, _capas_sud):
+    """Une los polígonos de Ecuador, Perú y Bolivia (uno por país)."""
+
+    partes = []
+
+    for _, gdf in _capas_sud:
+
+        col = detectar_columna_pais(gdf)
+
+        if col is None:
+            continue
+
+        paises = gdf[col].map(pais_desde_texto)
+
+        g = gpd.GeoDataFrame(
+            {
+                "pais": paises.values,
+                "geometry": gdf.geometry.values,
+            },
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+        g = g[g["pais"].notna()]
+
+        if not g.empty:
+            partes.append(g)
+
+    if not partes:
+        return gpd.GeoDataFrame(
+            {"pais": [], "geometry": []},
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+    todo = gpd.GeoDataFrame(
+        pd.concat(partes, ignore_index=True),
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+    try:
+        todo["geometry"] = todo.geometry.buffer(0)
+    except Exception:
+        pass
+
+    return todo.dissolve(by="pais", as_index=False)
+
+
+def asignar_pais(geom, paises_gdf):
+
+    if paises_gdf is None or paises_gdf.empty:
+        return SIN_PAIS
+
+    for _, fila in paises_gdf.iterrows():
+        if fila.geometry.covers(geom):
+            return fila["pais"]
+
+    distancias = paises_gdf.geometry.distance(geom)
+    idx = distancias.idxmin()
+
+    # ~11 km de tolerancia para estaciones en el borde.
+    if float(distancias.loc[idx]) <= 0.1:
+        return paises_gdf.loc[idx, "pais"]
+
+    return SIN_PAIS
+
+
+@st.cache_resource(show_spinner=False, max_entries=4)
+def construir_estaciones(clave, _capas_puntos, _paises):
+    """Lista de estaciones con país, código y nombre."""
+
+    estaciones = []
+
+    for nombre_capa, gdf in _capas_puntos:
+
+        col_nombre = buscar_columna(gdf, CANDIDATOS_NOMBRE)
+        col_codigo = buscar_columna(gdf, CANDIDATOS_CODIGO)
+
+        otras = [
+            c for c in gdf.columns
+            if c != gdf.geometry.name
+            and c != col_codigo
+        ]
+
+        if col_nombre is None and otras:
+            col_nombre = otras[0]
+
+        for i in range(len(gdf)):
+
+            geom = gdf.geometry.iloc[i]
 
             if geom.geom_type != "Point":
                 continue
 
-            distancia = geom.distance(punto)
+            nombre = (
+                limpiar_valor(gdf[col_nombre].iloc[i])
+                if col_nombre is not None
+                else f"Estación {i + 1}"
+            )
 
-            if distancia < distancia_minima:
-                distancia_minima = distancia
-                mejor = (nombre, indice, geom)
+            codigo = (
+                limpiar_valor(gdf[col_codigo].iloc[i])
+                if col_codigo is not None
+                else "S/D"
+            )
 
-    if distancia_minima > 0.02:
-        return None
+            estaciones.append(
+                {
+                    "clave": f"{nombre_capa}#{i}",
+                    "capa": nombre_capa,
+                    "nombre": nombre,
+                    "codigo": codigo,
+                    "pais": asignar_pais(geom, _paises),
+                    "lat": float(geom.y),
+                    "lon": float(geom.x),
+                }
+            )
 
-    return mejor
+    return estaciones
 
+
+# ============================================================
+# 5. FUNCIONES GEOGRÁFICAS
+# ============================================================
 
 def buscar_cuenca(lat, lon, capas_subcuencas):
 
@@ -324,6 +505,12 @@ def buscar_cuenca(lat, lon, capas_subcuencas):
     return None
 
 
+@st.cache_data(show_spinner=False, max_entries=100)
+def cuenca_de_estacion(lat, lon, clave, _capas_sub):
+
+    return buscar_cuenca(lat, lon, _capas_sub)
+
+
 def obtener_poligono(seleccion, capas_subcuencas):
 
     if seleccion is None:
@@ -342,13 +529,57 @@ def obtener_poligono(seleccion, capas_subcuencas):
 
 
 def calcular_area_km2(poligono):
-    """Área del polígono en km² usando proyección de área equivalente."""
 
     try:
         serie = gpd.GeoSeries([poligono], crs="EPSG:4326")
         return float(serie.to_crs(CRS_AREA).area.iloc[0]) / 1_000_000
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner=False, max_entries=50)
+def rios_de_cuenca(nombre_sel, indice_sel, clave, _capas_sub, _capas_rios):
+    """Tramos de río dentro de la cuenca, como lista de GeoJSON."""
+
+    poligono = obtener_poligono(
+        (nombre_sel, indice_sel),
+        _capas_sub
+    )
+
+    resultado = []
+
+    if poligono is None:
+        return resultado
+
+    for nombre, gdf in _capas_rios:
+
+        try:
+
+            posiciones = gdf.sindex.query(
+                poligono,
+                predicate="intersects"
+            )
+
+            if len(posiciones) == 0:
+                continue
+
+            sel = gdf.iloc[posiciones].copy()
+
+            sel.geometry = sel.geometry.intersection(poligono)
+
+            sel = sel[~sel.geometry.is_empty]
+
+            if sel.empty:
+                continue
+
+            resultado.append(
+                sel[[sel.geometry.name]].to_json(drop_id=True)
+            )
+
+        except Exception:
+            continue
+
+    return resultado
 
 
 def extension_general(capas):
@@ -365,41 +596,190 @@ def extension_general(capas):
                 pass
 
     if not limites:
-        return [[-20, -82], [5, -60]]
+        return None
 
     xmin = min(b[0] for b in limites)
     ymin = min(b[1] for b in limites)
     xmax = max(b[2] for b in limites)
     ymax = max(b[3] for b in limites)
 
-    return [[ymin, xmin], [ymax, xmax]]
-
-
-def columna_nombre(gdf):
-
-    for campo in CAMPOS_NOMBRE:
-        if campo in gdf.columns:
-            return campo
-
-    return None
+    return xmin, ymin, xmax, ymax
 
 
 # ============================================================
-# 4. ESTADO DE SELECCIÓN
+# 6. MAPA GENERAL ESTÁTICO (IMAGEN)
 # ============================================================
 
-if "estacion_activa" not in st.session_state:
-    st.session_state.estacion_activa = None
+@st.cache_data(show_spinner=False, max_entries=2)
+def mapa_estatico(
+    clave,
+    _capas_sud,
+    _capas_sub,
+    _capas_rios,
+    _estaciones,
+    _paises,
+):
 
-if "cuenca_activa" not in st.session_state:
-    st.session_state.cuenca_activa = None
+    fig, ax = plt.subplots(figsize=(9, 10))
 
-if "ultimo_clic" not in st.session_state:
-    st.session_state.ultimo_clic = None
+    ax.set_facecolor("#D6E6F2")
+
+    # Sudamérica de fondo.
+    for _, gdf in _capas_sud:
+        try:
+            gdf.plot(
+                ax=ax,
+                facecolor="#F1F0EA",
+                edgecolor="#A7A79F",
+                linewidth=0.4,
+            )
+        except Exception:
+            pass
+
+    # Países de estudio resaltados.
+    if _paises is not None and not _paises.empty:
+
+        for _, fila in _paises.iterrows():
+
+            try:
+                gpd.GeoSeries(
+                    [fila.geometry],
+                    crs="EPSG:4326"
+                ).plot(
+                    ax=ax,
+                    facecolor=COLORES_PAIS.get(fila["pais"], "#DDDDDD"),
+                    edgecolor="#555555",
+                    linewidth=0.9,
+                )
+            except Exception:
+                pass
+
+    # Subcuencas, un color por polígono.
+    for nombre, gdf in _capas_sub:
+
+        try:
+
+            desplazamiento = int(
+                hashlib.md5(nombre.encode("utf-8")).hexdigest()[:4], 16
+            ) % 997
+
+            colores = [
+                color_por_indice(i, desplazamiento)
+                for i in range(len(gdf))
+            ]
+
+            gdf.plot(
+                ax=ax,
+                color=colores,
+                edgecolor="#555555",
+                linewidth=0.15,
+                alpha=0.60,
+            )
+
+        except Exception:
+            pass
+
+    # Ríos.
+    for _, gdf in _capas_rios:
+        try:
+            gdf.plot(ax=ax, color="#2E86C1", linewidth=0.35)
+        except Exception:
+            pass
+
+    # Estaciones.
+    if _estaciones:
+        ax.scatter(
+            [e["lon"] for e in _estaciones],
+            [e["lat"] for e in _estaciones],
+            s=9,
+            c="#D9534F",
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=5,
+        )
+
+    # Etiquetas de país.
+    if _paises is not None and not _paises.empty:
+
+        for _, fila in _paises.iterrows():
+
+            try:
+                p = fila.geometry.representative_point()
+
+                ax.annotate(
+                    fila["pais"].upper(),
+                    (p.x, p.y),
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    fontweight="bold",
+                    color="#2B2B2B",
+                    alpha=0.85,
+                    zorder=6,
+                )
+            except Exception:
+                pass
+
+    # Extensión.
+    try:
+
+        if _paises is not None and not _paises.empty:
+            xmin, ymin, xmax, ymax = _paises.total_bounds
+        else:
+            xmin, ymin, xmax, ymax = extension_general(
+                list(_capas_sud) + list(_capas_sub)
+            )
+
+        margen = 1.5
+
+        ax.set_xlim(xmin - margen, xmax + margen)
+        ax.set_ylim(ymin - margen, ymax + margen)
+
+    except Exception:
+        pass
+
+    ax.set_aspect("equal")
+
+    ax.grid(True, color="#B9C7D3", linewidth=0.4, linestyle="--")
+    ax.tick_params(labelsize=7)
+    ax.set_xlabel("Longitud", fontsize=8)
+    ax.set_ylabel("Latitud", fontsize=8)
+
+    ax.set_title(
+        "Cuencas Andino-Amazónicas de Ecuador, Perú y Bolivia",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    leyenda = [
+        Patch(facecolor=COLORES_PAIS["Ecuador"], edgecolor="#555", label="Ecuador"),
+        Patch(facecolor=COLORES_PAIS["Perú"], edgecolor="#555", label="Perú"),
+        Patch(facecolor=COLORES_PAIS["Bolivia"], edgecolor="#555", label="Bolivia"),
+        Patch(facecolor="#C9B6D9", edgecolor="#555", alpha=0.7,
+              label="Subcuencas (color por polígono)"),
+        Line2D([0], [0], color="#2E86C1", linewidth=1.2, label="Ríos"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#D9534F",
+               markeredgecolor="white", markersize=7, label="Estaciones"),
+    ]
+
+    ax.legend(
+        handles=leyenda,
+        loc="lower left",
+        fontsize=7,
+        framealpha=0.92,
+    )
+
+    buffer = BytesIO()
+
+    fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
+
+    plt.close(fig)
+
+    return buffer.getvalue()
 
 
 # ============================================================
-# 5. ENCABEZADO
+# 7. ENCABEZADO Y PANEL LATERAL
 # ============================================================
 
 st.title(
@@ -412,40 +792,19 @@ st.caption(
     "Estaciones, subcuencas y red hidrográfica"
 )
 
+st.sidebar.title("Opciones")
 
-# ============================================================
-# 6. PANEL LATERAL
-# ============================================================
-
-st.sidebar.title("Panel de capas")
-
-ver_sudamerica = st.sidebar.checkbox("Sudamérica", value=True)
-ver_subcuencas = st.sidebar.checkbox("Subcuencas", value=True)
-ver_rios = st.sidebar.checkbox("Ríos", value=True)
-ver_puntos = st.sidebar.checkbox("Estaciones hidrológicas", value=True)
-ver_satelite = st.sidebar.checkbox("Google Satélite", value=True)
-
-st.sidebar.divider()
-
-if st.sidebar.button("Mostrar vista general", use_container_width=True):
-
-    st.session_state.cuenca_activa = None
-    st.session_state.estacion_activa = None
-    st.session_state.ultimo_clic = None
-    st.rerun()
+ver_satelite = st.sidebar.checkbox("Google Satélite en el mapa de cuenca", value=True)
 
 if st.sidebar.button("Recargar archivos", use_container_width=True):
 
     st.cache_data.clear()
     st.cache_resource.clear()
-    st.session_state.cuenca_activa = None
-    st.session_state.estacion_activa = None
-    st.session_state.ultimo_clic = None
     st.rerun()
 
 
 # ============================================================
-# 7. CARGAR DATOS
+# 8. CARGAR DATOS
 # ============================================================
 
 with st.spinner("Leyendo capas geográficas..."):
@@ -457,418 +816,135 @@ with st.spinner("Leyendo capas geográficas..."):
 
 errores = e1 + e2 + e3 + e4
 
+clave_sud = firma(capas_sudamerica)
+clave_sub = firma(capas_subcuencas)
+clave_rios = firma(capas_rios)
+clave_pts = firma(capas_puntos)
 
-# ============================================================
-# 8. INDICADORES
-# ============================================================
+paises_gdf = construir_paises(clave_sud, capas_sudamerica)
 
-total_estaciones = sum(len(gdf) for _, gdf in capas_puntos)
-
-c1, c2, c3 = st.columns(3)
-
-c1.metric("Estaciones", total_estaciones)
-c2.metric("Archivos de subcuencas", len(capas_subcuencas))
-c3.metric("Capas de ríos", len(capas_rios))
-
-
-# ============================================================
-# 9. MAPA
-# ============================================================
-
-seleccion = st.session_state.cuenca_activa
-
-poligono_activo = obtener_poligono(seleccion, capas_subcuencas)
-
-area_activa_km2 = (
-    calcular_area_km2(poligono_activo)
-    if poligono_activo is not None
-    else None
+estaciones = construir_estaciones(
+    clave_pts + "||" + clave_sud,
+    capas_puntos,
+    paises_gdf
 )
 
-capas_todas = (
-    capas_sudamerica
-    + capas_subcuencas
-    + capas_rios
-    + capas_puntos
-)
-
-bounds_general = extension_general(capas_todas)
-
-mapa = folium.Map(
-    location=[-5, -74],
-    zoom_start=5,
-    tiles=None,
-    prefer_canvas=True,
-    control_scale=True
-)
-
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-    attr="Google Satellite",
-    name="Google Satélite",
-    overlay=False,
-    show=ver_satelite,
-    max_zoom=20
-).add_to(mapa)
-
-folium.TileLayer(
-    "OpenStreetMap",
-    name="OpenStreetMap",
-    overlay=False,
-    show=not ver_satelite
-).add_to(mapa)
+estaciones_por_clave = {e["clave"]: e for e in estaciones}
 
 
 # ============================================================
-# 10. SUDAMÉRICA
+# 9. INDICADORES
 # ============================================================
 
-if ver_sudamerica:
+conteo = {p: 0 for p in PAISES_LISTA}
+conteo[SIN_PAIS] = 0
 
-    grupo = folium.FeatureGroup(name="Sudamérica", show=True)
+for e in estaciones:
+    conteo[e["pais"]] = conteo.get(e["pais"], 0) + 1
 
-    for nombre, gdf in capas_sudamerica:
+m1, m2, m3, m4 = st.columns(4)
 
-        folium.GeoJson(
-            geojson_capa("sudamerica", nombre, gdf),
-            style_function=lambda f: {
-                "color": "#697783",
-                "weight": 1,
-                "fillColor": "#B0BAC2",
-                "fillOpacity": 0.04,
-            },
-        ).add_to(grupo)
+m1.metric("Estaciones totales", len(estaciones))
+m2.metric("Ecuador", conteo["Ecuador"])
+m3.metric("Perú", conteo["Perú"])
+m4.metric("Bolivia", conteo["Bolivia"])
 
-    grupo.add_to(mapa)
-
-
-# ============================================================
-# 11. SUBCUENCAS: UN COLOR DISTINTO POR POLÍGONO
-# ============================================================
-
-if ver_subcuencas:
-
-    grupo_cuencas = folium.FeatureGroup(name="Subcuencas", show=True)
-
-    for nombre, gdf in capas_subcuencas:
-
-        folium.GeoJson(
-            geojson_capa("subcuencas", nombre, gdf),
-            style_function=lambda f: {
-                "color": f["properties"].get("color", "#888888"),
-                "weight": 1.0 if seleccion is None else 0.5,
-                "opacity": 0.85 if seleccion is None else 0.20,
-                "fillColor": f["properties"].get("color", "#888888"),
-                "fillOpacity": 0.45 if seleccion is None else 0.05,
-            },
-        ).add_to(grupo_cuencas)
-
-    grupo_cuencas.add_to(mapa)
-
-
-# ============================================================
-# 12. RÍOS GENERALES (ATENUADOS SI HAY SELECCIÓN)
-# ============================================================
-
-if ver_rios:
-
-    grupo_rios = folium.FeatureGroup(name="Ríos", show=True)
-
-    for nombre, gdf in capas_rios:
-
-        folium.GeoJson(
-            geojson_capa("rios", nombre, gdf),
-            style_function=lambda f: {
-                "color": COLOR_RIO_NORMAL,
-                "weight": 1.2,
-                "opacity": 0.55 if seleccion is None else 0.12,
-            },
-        ).add_to(grupo_rios)
-
-    grupo_rios.add_to(mapa)
-
-
-# ============================================================
-# 13. CUENCA SELECCIONADA (RESALTADA + ÁREA)
-# ============================================================
-
-if poligono_activo is not None:
-
-    grupo_activo = folium.FeatureGroup(
-        name="Cuenca seleccionada",
-        show=True
-    )
-
-    texto_area = (
-        f"Área: {area_activa_km2:,.2f} km²"
-        if area_activa_km2 is not None
-        else "Área no disponible"
-    )
-
-    feature_activo = {
-        "type": "Feature",
-        "geometry": poligono_activo.__geo_interface__,
-        "properties": {},
-    }
-
-    # Capa inferior: brillo/halo blanco.
-    folium.GeoJson(
-        feature_activo,
-        style_function=lambda f: {
-            "color": COLOR_BORDE_ACTIVO,
-            "weight": 9,
-            "opacity": 0.35,
-            "fillOpacity": 0,
-        },
-    ).add_to(grupo_activo)
-
-    # Capa superior: relleno dorado con borde blanco.
-    folium.GeoJson(
-        feature_activo,
-        style_function=lambda f: {
-            "color": COLOR_BORDE_ACTIVO,
-            "weight": 3,
-            "opacity": 1,
-            "fillColor": COLOR_CUENCA_ACTIVA,
-            "fillOpacity": 0.45,
-        },
-        tooltip=texto_area,
-    ).add_to(grupo_activo)
-
-    grupo_activo.add_to(mapa)
-
-
-# ============================================================
-# 14. RÍOS DE LA CUENCA SELECCIONADA
-# ============================================================
-
-if ver_rios and poligono_activo is not None:
-
-    grupo_rios_activos = folium.FeatureGroup(
-        name="Ríos de la cuenca seleccionada",
-        show=True
-    )
-
-    for nombre, gdf in capas_rios:
-
-        try:
-
-            mascara = gdf.geometry.intersects(poligono_activo)
-
-            rios_intersectados = gdf.loc[mascara].copy()
-
-            if rios_intersectados.empty:
-                continue
-
-            rios_intersectados.geometry = (
-                rios_intersectados.geometry.intersection(
-                    poligono_activo
-                )
-            )
-
-            rios_intersectados = rios_intersectados[
-                ~rios_intersectados.geometry.is_empty
-            ]
-
-            if rios_intersectados.empty:
-                continue
-
-            geojson = rios_intersectados[
-                [rios_intersectados.geometry.name]
-            ].to_json(drop_id=True)
-
-            folium.GeoJson(
-                geojson,
-                style_function=lambda f: {
-                    "color": COLOR_RIO_ACTIVO,
-                    "weight": 3,
-                    "opacity": 1,
-                },
-            ).add_to(grupo_rios_activos)
-
-        except Exception:
-            continue
-
-    grupo_rios_activos.add_to(mapa)
-
-
-# ============================================================
-# 15. ESTACIONES
-# ============================================================
-
-if ver_puntos:
-
-    grupo_estaciones = folium.FeatureGroup(
-        name="Estaciones hidrológicas",
-        show=True
-    )
-
-    for nombre, gdf in capas_puntos:
-
-        campo_nombre = columna_nombre(gdf)
-
-        for indice in range(len(gdf)):
-
-            geom = gdf.geometry.iloc[indice]
-
-            if geom.geom_type != "Point":
-                continue
-
-            activa = (
-                st.session_state.estacion_activa
-                == (nombre, int(indice))
-            )
-
-            nombre_estacion = nombre
-
-            if campo_nombre is not None:
-
-                valor = str(gdf[campo_nombre].iloc[indice]).strip()
-
-                if valor and valor.lower() != "none":
-                    nombre_estacion = valor
-
-            folium.CircleMarker(
-                location=[geom.y, geom.x],
-                radius=8 if activa else 4,
-                color="#FFFFFF",
-                weight=2 if activa else 1.5,
-                fill=True,
-                fill_color=(
-                    COLOR_ESTACION_ACTIVA
-                    if activa
-                    else COLOR_ESTACION
-                ),
-                fill_opacity=1,
-                tooltip=nombre_estacion,
-            ).add_to(grupo_estaciones)
-
-    grupo_estaciones.add_to(mapa)
-
-
-# ============================================================
-# 16. EXTENSIÓN DEL MAPA
-# ============================================================
-
-if poligono_activo is not None:
-
-    bx1, by1, bx2, by2 = poligono_activo.bounds
-
-    mapa.fit_bounds(
-        [[by1, bx1], [by2, bx2]],
-        padding=(35, 35)
-    )
-
-else:
-
-    mapa.fit_bounds(bounds_general, padding=(20, 20))
-
-
-# ============================================================
-# 17. CONTROLES
-# ============================================================
-
-Fullscreen(position="topleft").add_to(mapa)
-
-folium.LayerControl(collapsed=True).add_to(mapa)
-
-
-# ============================================================
-# 18. MOSTRAR MAPA
-# ============================================================
-
-st.subheader("Visor geoespacial")
-
-st.caption(
-    "Haz clic en una estación roja para resaltar "
-    "su subcuenca y ver su área."
-)
-
-resultado = st_folium(
-    mapa,
-    use_container_width=True,
-    height=720,
-    returned_objects=["last_object_clicked"],
-    key="mapa_bid"
-)
-
-
-# ============================================================
-# 19. PROCESAR SELECCIÓN
-# ============================================================
-
-if resultado:
-
-    clic = resultado.get("last_object_clicked")
-
-    if clic is not None:
-
-        lat = clic.get("lat")
-        lon = clic.get("lng")
-
-        if lat is not None and lon is not None:
-
-            identificador_clic = (round(lat, 7), round(lon, 7))
-
-            if identificador_clic != st.session_state.ultimo_clic:
-
-                st.session_state.ultimo_clic = identificador_clic
-
-                estacion = buscar_estacion(lat, lon, capas_puntos)
-
-                if estacion is not None:
-
-                    nombre_estacion, indice, geom = estacion
-
-                    cuenca = buscar_cuenca(
-                        geom.y,
-                        geom.x,
-                        capas_subcuencas
-                    )
-
-                    st.session_state.estacion_activa = (
-                        nombre_estacion,
-                        indice
-                    )
-
-                    st.session_state.cuenca_activa = cuenca
-
-                    st.rerun()
-
-
-# ============================================================
-# 20. ÁREA DE LA SELECCIÓN
-# ============================================================
-
-if st.session_state.cuenca_activa is not None:
-
-    if area_activa_km2 is not None:
-        st.success(f"Área de la subcuenca: {area_activa_km2:,.2f} km²")
-    else:
-        st.warning("No se pudo calcular el área de la subcuenca.")
-
-elif st.session_state.estacion_activa is not None:
-
+if paises_gdf.empty:
     st.warning(
-        "La estación seleccionada no pudo asociarse "
-        "con una subcuenca."
+        "No se pudo identificar la columna de países en el shape de "
+        "Sudamérica. Revisa que la carpeta 'sudamerica' tenga una "
+        "columna con los nombres de los países."
     )
 
 
 # ============================================================
-# 21. DIAGNÓSTICO
+# 10. MAPA GENERAL (ESTÁTICO)
 # ============================================================
 
-if errores:
+st.subheader("Mapa general")
 
-    with st.expander(f"Errores de lectura ({len(errores)})"):
+with st.spinner("Generando mapa general..."):
 
-        for error in errores:
-            st.write(error)
+    imagen = mapa_estatico(
+        clave_sud + "||" + clave_sub + "||" + clave_rios + "||" + clave_pts,
+        capas_sudamerica,
+        capas_subcuencas,
+        capas_rios,
+        estaciones,
+        paises_gdf,
+    )
+
+st.image(imagen, use_container_width=True)
 
 
 # ============================================================
-# 22. PIE DE PÁGINA
+# 11. SELECCIÓN DE PAÍS Y ESTACIÓN
 # ============================================================
 
-st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
+st.divider()
+
+st.subheader("Explorar cuenca por estación")
+
+opciones_pais = list(PAISES_LISTA)
+
+if conteo.get(SIN_PAIS, 0) > 0:
+    opciones_pais.append(SIN_PAIS)
+
+col_a, col_b = st.columns(2)
+
+with col_a:
+
+    pais_sel = st.selectbox(
+        "1. Selecciona el país",
+        opciones_pais,
+        index=None,
+        placeholder="Ecuador, Perú o Bolivia",
+        key="pais_sel",
+    )
+
+estacion_sel = None
+
+with col_b:
+
+    if pais_sel is None:
+
+        st.selectbox(
+            "2. Selecciona la estación",
+            [],
+            index=None,
+            placeholder="Primero elige un país",
+            disabled=True,
+            key="estacion_vacia",
+        )
+
+    else:
+
+        lista = sorted(
+            [e for e in estaciones if e["pais"] == pais_sel],
+            key=lambda e: e["nombre"].lower()
+        )
+
+        claves = [e["clave"] for e in lista]
+
+        estacion_sel = st.selectbox(
+            f"2. Selecciona la estación ({len(lista)} en {pais_sel})",
+            claves,
+            index=None,
+            placeholder="Elige una estación",
+            format_func=lambda k: (
+                f"{estaciones_por_clave[k]['codigo']} — "
+                f"{estaciones_por_clave[k]['nombre']}"
+            ),
+            key=f"estacion_{pais_sel}",
+        )
+
+if pais_sel is None:
+    st.info("Selecciona un país para ver sus estaciones.")
+
+elif estacion_sel is None:
+    st.info("Selecciona una estación para cargar su cuenca.")
+
+
+# ============================================================
+# 12. CUENCA DE LA ESTACIÓN: MAPA (IZQ.) + CARACTERÍSTICAS (DER.)
+# ============================================
