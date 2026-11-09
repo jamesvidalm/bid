@@ -1,12 +1,17 @@
+
+import os
+import warnings
+from pathlib import Path
+
 import streamlit as st
 import geopandas as gpd
 import pyogrio
 import folium
 
-from pathlib import Path
 from folium.plugins import Fullscreen, MousePosition, MiniMap
 from streamlit_folium import st_folium
 
+warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore")
 
 
