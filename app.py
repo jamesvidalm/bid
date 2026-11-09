@@ -1,21 +1,5 @@
 
 # -*- coding: utf-8 -*-
-"""
-VISOR HIDROLÓGICO BID
-Ecuador - Perú - Bolivia
-
-Carpetas del repositorio:
-    puntos/
-    rios/
-    subcuencas/
-    sudamerica/
-
-Comportamiento:
-- Vista general con capas atenuadas.
-- Clic en una estación para resaltar su subcuenca y sus ríos.
-- Las demás capas permanecen atenuadas.
-- Sin leyenda adicional.
-"""
 
 from pathlib import Path
 import hashlib
@@ -38,7 +22,7 @@ warnings.filterwarnings("ignore")
 # ============================================================
 
 st.set_page_config(
-    page_title="Modelamiento Hidrológico Andino-Amazónico",
+    page_title="Visor Hidrológico BID",
     page_icon="🌎",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -51,22 +35,23 @@ DIR_RIOS = ROOT / "rios"
 DIR_SUBCUENCAS = ROOT / "subcuencas"
 DIR_SUDAMERICA = ROOT / "sudamerica"
 
+COLOR_RIO = "#8CB8CC"
+COLOR_RIO_SELECCION = "#00A6D6"
+COLOR_SELECCION = "#FFD21F"
+COLOR_PUNTO = "#D94A45"
+
 PALETA = [
-    "#8DAA91", "#9C89B8", "#C49A6C", "#78A6C8",
-    "#B58A9A", "#9DAA70", "#8E9DB5", "#C1A477",
+    "#A6B98A", "#9C91B8", "#C3A17D", "#78A6C8",
+    "#B58A9A", "#A6AD78", "#8E9DB5", "#C1A477",
     "#7FA69A", "#AA8F78", "#8F9FBA", "#B28DAD",
     "#91A77B", "#C19B8B", "#7899A8", "#A89C72",
+    "#A1A1A1", "#8CA6A0", "#B5A08A", "#929FBD",
 ]
-
-COLOR_SELECCION = "#F2B705"
-COLOR_RIO_GENERAL = "#A7C5D2"
-COLOR_RIO_SELECCION = "#00A6D6"
-COLOR_PUNTO = "#D94A45"
-COLOR_PUNTO_SELECCION = "#FFD000"
 
 
 # ============================================================
-# 2. ENCABEZADO
+# 2. ENCABEZADO NATIVO DE STREAMLIT
+# IMPORTANTE: NO SE UTILIZA HTML
 # ============================================================
 
 st.title(
@@ -75,16 +60,18 @@ st.title(
 )
 
 st.caption(
-    "Plataforma de visualización de cuencas, "
-    "subcuencas, ríos y estaciones hidrológicas"
+    "Ecuador · Perú · Bolivia | Cuencas, ríos y estaciones hidrológicas"
 )
+
+st.divider()
 
 
 # ============================================================
-# 3. FUNCIONES
+# 3. FUNCIONES DE ARCHIVOS
 # ============================================================
 
 def buscar_archivos(carpeta):
+
     if not carpeta.exists():
         return []
 
@@ -92,13 +79,14 @@ def buscar_archivos(carpeta):
         [
             p for p in carpeta.rglob("*")
             if p.is_file()
-            and p.suffix.lower() in [".shp", ".gpkg"]
+            and p.suffix.lower() in (".shp", ".gpkg")
         ],
         key=lambda p: str(p).lower()
     )
 
 
 def nombre_relativo(archivo, carpeta):
+
     try:
         return archivo.relative_to(carpeta).with_suffix("").as_posix()
     except Exception:
@@ -106,20 +94,33 @@ def nombre_relativo(archivo, carpeta):
 
 
 def color_estable(nombre):
+
     numero = int(
-        hashlib.md5(nombre.encode("utf-8")).hexdigest()[:8],
+        hashlib.md5(
+            nombre.encode("utf-8")
+        ).hexdigest()[:8],
         16
     )
+
     return PALETA[numero % len(PALETA)]
 
 
+# ============================================================
+# 4. LECTURA CON CACHÉ
+# ============================================================
+
 @st.cache_data(show_spinner=False, max_entries=150)
-def leer_shapefile(ruta, modificacion):
-    return gpd.read_file(ruta, engine="pyogrio")
+def leer_shp(ruta, modificacion):
+
+    return gpd.read_file(
+        ruta,
+        engine="pyogrio"
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=250)
 def leer_gpkg(ruta, capa, modificacion):
+
     return gpd.read_file(
         ruta,
         layer=capa,
@@ -130,10 +131,10 @@ def leer_gpkg(ruta, capa, modificacion):
 def preparar_gdf(gdf, tipo):
 
     if gdf is None or gdf.empty:
-        raise ValueError("Archivo sin registros.")
+        raise ValueError("Archivo vacío.")
 
     if gdf.crs is None:
-        raise ValueError("Archivo sin CRS.")
+        raise ValueError("No tiene CRS definido.")
 
     gdf = gdf[
         gdf.geometry.notna()
@@ -144,12 +145,14 @@ def preparar_gdf(gdf, tipo):
     ].copy()
 
     if gdf.empty:
-        raise ValueError("Sin geometrías válidas.")
+        raise ValueError("No contiene geometrías válidas.")
 
     if gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(epsg=4326)
 
-    # Simplificación según el tipo de geometría.
+        gdf = gdf.to_crs(
+            epsg=4326
+        )
+
     tolerancias = {
         "puntos": 0,
         "rios": 0.00010,
@@ -159,24 +162,12 @@ def preparar_gdf(gdf, tipo):
 
     tolerancia = tolerancias.get(tipo, 0)
 
-    if tolerancia > 0:
-        try:
-            gdf.geometry = gdf.geometry.simplify(
-                tolerance=tolerancia,
-                preserve_topology=True
-            )
-        except Exception:
-            pass
+    if tolerancia:
 
-    # Conservar solo algunos atributos para los popups.
-    geometria = gdf.geometry.name
-
-    atributos = [
-        c for c in gdf.columns
-        if c != geometria
-    ][:5]
-
-    gdf = gdf[atributos + [geometria]].copy()
+        gdf.geometry = gdf.geometry.simplify(
+            tolerance=tolerancia,
+            preserve_topology=True
+        )
 
     return gdf.reset_index(drop=True)
 
@@ -194,7 +185,7 @@ def cargar_archivo(archivo, carpeta, tipo):
 
     if archivo.suffix.lower() == ".shp":
 
-        gdf = leer_shapefile(
+        gdf = leer_shp(
             str(archivo),
             mtime
         )
@@ -233,10 +224,10 @@ def cargar_archivo(archivo, carpeta, tipo):
                 tipo
             )
 
-            if len(nombres) == 1:
-                nombre_capa = nombre
-            else:
-                nombre_capa = f"{nombre} - {capa}"
+            nombre_capa = (
+                nombre if len(nombres) == 1
+                else f"{nombre} - {capa}"
+            )
 
             resultados.append(
                 (nombre_capa, gdf)
@@ -250,18 +241,17 @@ def cargar_carpeta(carpeta, tipo):
     capas = []
     errores = []
 
-    archivos = buscar_archivos(carpeta)
-
-    for archivo in archivos:
+    for archivo in buscar_archivos(carpeta):
 
         try:
-            resultados = cargar_archivo(
-                archivo,
-                carpeta,
-                tipo
-            )
 
-            capas.extend(resultados)
+            capas.extend(
+                cargar_archivo(
+                    archivo,
+                    carpeta,
+                    tipo
+                )
+            )
 
         except Exception as error:
 
@@ -272,19 +262,16 @@ def cargar_carpeta(carpeta, tipo):
     return capas, errores
 
 
-def campos_popup(gdf):
-
-    return [
-        c for c in gdf.columns
-        if c != gdf.geometry.name
-    ][:5]
-
-
 # ============================================================
-# 4. CARGAR INFORMACIÓN GEOGRÁFICA
+# 5. CARGAR LAS CUATRO CARPETAS
 # ============================================================
 
 with st.spinner("Cargando información geográfica..."):
+
+    capas_sudamerica, errores_sudamerica = cargar_carpeta(
+        DIR_SUDAMERICA,
+        "sudamerica"
+    )
 
     capas_puntos, errores_puntos = cargar_carpeta(
         DIR_PUNTOS,
@@ -301,24 +288,19 @@ with st.spinner("Cargando información geográfica..."):
         "subcuencas"
     )
 
-    capas_sudamerica, errores_sudamerica = cargar_carpeta(
-        DIR_SUDAMERICA,
-        "sudamerica"
-    )
-
 errores = (
-    errores_puntos
+    errores_sudamerica
+    + errores_puntos
     + errores_rios
     + errores_subcuencas
-    + errores_sudamerica
 )
 
 
 # ============================================================
-# 5. PANEL LATERAL
+# 6. PANEL LATERAL
 # ============================================================
 
-st.sidebar.title("Panel de visualización")
+st.sidebar.title("Panel de capas")
 
 ver_sudamerica = st.sidebar.checkbox(
     "Sudamérica",
@@ -347,91 +329,110 @@ ver_satelite = st.sidebar.checkbox(
 
 st.sidebar.divider()
 
+st.sidebar.markdown("**Archivos detectados**")
+
 st.sidebar.write(
-    f"Estaciones: {sum(len(g) for _, g in capas_puntos):,}"
+    f"Sudamérica: {len(buscar_archivos(DIR_SUDAMERICA))}"
 )
 
 st.sidebar.write(
-    f"Capas de ríos: {len(capas_rios)}"
+    f"Puntos: {len(buscar_archivos(DIR_PUNTOS))}"
 )
 
 st.sidebar.write(
-    f"Capas de subcuencas: {len(capas_subcuencas)}"
+    f"Ríos: {len(buscar_archivos(DIR_RIOS))}"
 )
 
 st.sidebar.write(
-    f"Capas de Sudamérica: {len(capas_sudamerica)}"
+    f"Subcuencas: {len(buscar_archivos(DIR_SUBCUENCAS))}"
 )
 
 if st.sidebar.button(
     "Recargar archivos",
     use_container_width=True
 ):
+
     st.cache_data.clear()
-    st.session_state.pop("punto_seleccionado", None)
-    st.session_state.pop("ultimo_clic", None)
+
+    for key in [
+        "subcuenca_seleccionada",
+        "estacion_seleccionada",
+        "ultimo_clic"
+    ]:
+        st.session_state.pop(key, None)
+
     st.rerun()
 
 
 # ============================================================
-# 6. DETECTAR ESTACIÓN SELECCIONADA
+# 7. ESTADO DE SELECCIÓN
 # ============================================================
 
-if "punto_seleccionado" not in st.session_state:
-    st.session_state.punto_seleccionado = None
+if "subcuenca_seleccionada" not in st.session_state:
+    st.session_state.subcuenca_seleccionada = None
+
+if "estacion_seleccionada" not in st.session_state:
+    st.session_state.estacion_seleccionada = None
 
 if "ultimo_clic" not in st.session_state:
     st.session_state.ultimo_clic = None
 
 
 # ============================================================
-# 7. IDENTIFICAR LA SUBCUENCA DEL PUNTO
+# 8. IDENTIFICAR SUBCUENCA
 # ============================================================
 
 def buscar_subcuenca(lat, lon):
 
     punto = Point(lon, lat)
 
-    seleccion = None
-    distancia_minima = float("inf")
-
-    # Primero busca el polígono que contiene el punto.
     for nombre, gdf in capas_subcuencas:
 
         for indice, geometria in enumerate(gdf.geometry):
 
             try:
+
                 if geometria.covers(punto):
+
                     return nombre, indice
+
             except Exception:
                 continue
 
-    # Si no está dentro de un polígono,
-    # selecciona la subcuenca más cercana.
+    # Si no está dentro, buscar la más cercana.
+    mejor = None
+    distancia_minima = float("inf")
+
     for nombre, gdf in capas_subcuencas:
 
         for indice, geometria in enumerate(gdf.geometry):
 
             try:
+
                 distancia = geometria.distance(punto)
 
                 if distancia < distancia_minima:
+
                     distancia_minima = distancia
-                    seleccion = (nombre, indice)
+
+                    mejor = (
+                        nombre,
+                        indice
+                    )
 
             except Exception:
                 continue
 
-    # Evita seleccionar una subcuenca muy alejada.
+    # Máximo aproximado de 5 km en coordenadas geográficas.
     if distancia_minima > 0.05:
         return None
 
-    return seleccion
+    return mejor
 
 
-def buscar_estacion_cercana(lat, lon):
+def buscar_estacion(lat, lon):
 
-    punto = Point(lon, lat)
+    punto_clic = Point(lon, lat)
 
     mejor = None
     distancia_minima = float("inf")
@@ -440,15 +441,22 @@ def buscar_estacion_cercana(lat, lon):
 
         for indice, geometria in enumerate(gdf.geometry):
 
-            try:
-                distancia = geometria.distance(punto)
-
-                if distancia < distancia_minima:
-                    distancia_minima = distancia
-                    mejor = (nombre, indice, geometria)
-
-            except Exception:
+            if geometria.geom_type != "Point":
                 continue
+
+            distancia = geometria.distance(
+                punto_clic
+            )
+
+            if distancia < distancia_minima:
+
+                distancia_minima = distancia
+
+                mejor = (
+                    nombre,
+                    indice,
+                    geometria
+                )
 
     if mejor is None or distancia_minima > 0.02:
         return None
@@ -457,7 +465,7 @@ def buscar_estacion_cercana(lat, lon):
 
 
 # ============================================================
-# 8. CONSTRUIR MAPA
+# 9. EXTENSIÓN GENERAL
 # ============================================================
 
 todas_las_capas = (
@@ -467,42 +475,41 @@ todas_las_capas = (
     + capas_puntos
 )
 
-if todas_las_capas:
+limites = [
+    gdf.total_bounds
+    for _, gdf in todas_las_capas
+    if not gdf.empty
+]
 
-    bounds = [
-        gdf.total_bounds
-        for _, gdf in todas_las_capas
-    ]
+if limites:
 
-    xmin = min(b[0] for b in bounds)
-    ymin = min(b[1] for b in bounds)
-    xmax = max(b[2] for b in bounds)
-    ymax = max(b[3] for b in bounds)
+    xmin = min(b[0] for b in limites)
+    ymin = min(b[1] for b in limites)
+    xmax = max(b[2] for b in limites)
+    ymax = max(b[3] for b in limites)
 
-    centro_general = [
+    centro = [
         (ymin + ymax) / 2,
         (xmin + xmax) / 2
     ]
 
 else:
 
-    centro_general = [-4.0, -75.0]
+    xmin, ymin, xmax, ymax = -82, -20, -55, 5
+    centro = [-4, -75]
 
 
-seleccion = st.session_state.punto_seleccionado
+# ============================================================
+# 10. CREAR MAPA
+# ============================================================
 
 mapa = folium.Map(
-    location=centro_general,
+    location=centro,
     zoom_start=5,
     tiles=None,
     control_scale=True,
     prefer_canvas=True,
 )
-
-
-# ============================================================
-# 9. MAPAS BASE
-# ============================================================
 
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
@@ -510,19 +517,19 @@ folium.TileLayer(
     name="Google Satélite",
     overlay=False,
     show=ver_satelite,
-    max_zoom=20,
+    max_zoom=20
 ).add_to(mapa)
 
 folium.TileLayer(
     "OpenStreetMap",
     name="OpenStreetMap",
     overlay=False,
-    show=not ver_satelite,
+    show=not ver_satelite
 ).add_to(mapa)
 
 
 # ============================================================
-# 10. SUDAMÉRICA
+# 11. SUDAMÉRICA
 # ============================================================
 
 if ver_sudamerica:
@@ -530,91 +537,94 @@ if ver_sudamerica:
     for nombre, gdf in capas_sudamerica:
 
         folium.GeoJson(
-            data=gdf.to_json(drop_id=True),
+            gdf.to_json(drop_id=True),
             name=f"Sudamérica - {nombre}",
             style_function=lambda feature: {
                 "color": "#59636E",
-                "weight": 1.2,
+                "weight": 1,
                 "fillColor": "#B9C2CA",
-                "fillOpacity": 0.10,
+                "fillOpacity": 0.08,
             },
-            show=True,
+            show=True
         ).add_to(mapa)
 
 
 # ============================================================
-# 11. SUBCUENCAS
+# 12. SUBCUENCAS
 # ============================================================
+
+seleccion = st.session_state.subcuenca_seleccionada
 
 if ver_subcuencas:
 
     for nombre, gdf in capas_subcuencas:
 
+        color_normal = color_estable(nombre)
+
         for indice, fila in gdf.iterrows():
 
             geometria = fila.geometry
 
-            es_seleccionada = (
+            seleccionada = (
                 seleccion is not None
-                and seleccion[0] == nombre
-                and seleccion[1] == indice
+                and seleccion == (nombre, indice)
             )
 
-            if es_seleccionada:
+            if seleccionada:
 
                 color = COLOR_SELECCION
-                relleno = COLOR_SELECCION
-                opacidad = 0.58
-                grosor = 3.2
+                opacidad = 0.55
+                grosor = 3
 
             else:
 
-                color = color_estable(nombre)
-                relleno = color
-                opacidad = 0.055 if seleccion else 0.13
-                grosor = 0.8 if seleccion else 1.0
-
-            propiedades = fila.drop(
-                labels=[gdf.geometry.name]
-            ).to_dict()
-
-            propiedades = {
-                str(k): str(v)
-                for k, v in propiedades.items()
-            }
+                color = color_normal
+                opacidad = 0.045 if seleccion else 0.13
+                grosor = 0.8 if seleccion else 1
 
             feature = {
                 "type": "Feature",
                 "geometry": geometria.__geo_interface__,
-                "properties": propiedades,
+                "properties": {
+                    "Codigo": nombre
+                }
             }
 
             folium.GeoJson(
-                data=feature,
+                feature,
                 name=nombre,
-                style_function=lambda f, c=color, o=opacidad, w=grosor, r=relleno: {
+                style_function=lambda f, c=color, o=opacidad, w=grosor: {
                     "color": c,
                     "weight": w,
-                    "fillColor": r,
+                    "fillColor": c,
                     "fillOpacity": o,
-                    "opacity": 0.95,
-                },
-                highlight_function=lambda f: {
-                    "weight": 3.5,
-                    "fillOpacity": 0.45,
                 },
                 tooltip=folium.GeoJsonTooltip(
-                    fields=list(propiedades.keys())[:4]
-                ) if propiedades else None,
-                show=True,
+                    fields=["Codigo"]
+                ),
+                show=True
             ).add_to(mapa)
 
 
 # ============================================================
-# 12. RÍOS
+# 13. RÍOS
 # ============================================================
 
 if ver_rios:
+
+    poligono_seleccionado = None
+
+    if seleccion is not None:
+
+        for nombre, gdf in capas_subcuencas:
+
+            if nombre == seleccion[0]:
+
+                poligono_seleccionado = (
+                    gdf.geometry.iloc[seleccion[1]]
+                )
+
+                break
 
     for nombre, gdf in capas_rios:
 
@@ -622,73 +632,51 @@ if ver_rios:
 
             geometria = fila.geometry
 
-            seleccionado = False
+            es_rio_seleccionado = False
 
-            if seleccion is not None:
-
-                nombre_sub, indice_sub = seleccion
+            if poligono_seleccionado is not None:
 
                 try:
-                    poligono = (
-                        capas_subcuencas[
-                            next(
-                                i for i, x in enumerate(capas_subcuencas)
-                                if x[0] == nombre_sub
-                            )
-                        ][1].geometry.iloc[indice_sub]
-                    )
 
-                    seleccionado = geometria.intersects(
-                        poligono
+                    es_rio_seleccionado = (
+                        geometria.intersects(
+                            poligono_seleccionado
+                        )
                     )
 
                 except Exception:
-                    seleccionado = False
+                    pass
 
-            if seleccionado:
+            if es_rio_seleccionado:
 
                 color = COLOR_RIO_SELECCION
-                grosor = 3.0
-                opacidad = 1.0
+                grosor = 3
+                opacidad = 1
 
             else:
 
-                color = COLOR_RIO_GENERAL
-                grosor = 0.9 if seleccion else 1.5
-                opacidad = 0.18 if seleccion else 0.55
-
-            propiedades = fila.drop(
-                labels=[gdf.geometry.name]
-            ).to_dict()
-
-            propiedades = {
-                str(k): str(v)
-                for k, v in propiedades.items()
-            }
-
-            feature = {
-                "type": "Feature",
-                "geometry": geometria.__geo_interface__,
-                "properties": propiedades,
-            }
+                color = COLOR_RIO
+                grosor = 1 if seleccion else 1.5
+                opacidad = 0.13 if seleccion else 0.55
 
             folium.GeoJson(
-                data=feature,
+                {
+                    "type": "Feature",
+                    "geometry": geometria.__geo_interface__,
+                    "properties": {}
+                },
                 name=nombre,
                 style_function=lambda f, c=color, w=grosor, o=opacidad: {
                     "color": c,
                     "weight": w,
                     "opacity": o,
                 },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=list(propiedades.keys())[:4]
-                ) if propiedades else None,
-                show=True,
+                show=True
             ).add_to(mapa)
 
 
 # ============================================================
-# 13. ESTACIONES HIDROLÓGICAS
+# 14. ESTACIONES
 # ============================================================
 
 if ver_puntos:
@@ -702,47 +690,23 @@ if ver_puntos:
             if geometria.geom_type != "Point":
                 continue
 
-            es_seleccionado = False
+            estacion_sel = st.session_state.estacion_seleccionada
 
-            if seleccion is not None:
-                punto_sel = st.session_state.punto_seleccionado
+            es_seleccionado = (
+                estacion_sel is not None
+                and estacion_sel == (nombre, indice)
+            )
 
-                if punto_sel:
-                    try:
-                        es_seleccionado = (
-                            abs(geometria.y - punto_sel["lat"]) < 0.00001
-                            and
-                            abs(geometria.x - punto_sel["lon"]) < 0.00001
-                        )
-                    except Exception:
-                        pass
+            color = (
+                "#FFD000"
+                if es_seleccionado
+                else COLOR_PUNTO
+            )
 
-            if es_seleccionado:
-
-                color = COLOR_PUNTO_SELECCION
-                radio = 8
-                opacidad = 1.0
-
-            else:
-
-                color = COLOR_PUNTO
-                radio = 3.5
-                opacidad = 0.45 if seleccion else 0.90
-
-            propiedades = fila.drop(
-                labels=[gdf.geometry.name]
-            ).to_dict()
-
-            propiedades = {
-                str(k): str(v)
-                for k, v in propiedades.items()
-            }
-
-            popup_html = "<br>".join(
-                [
-                    f"<b>{k}:</b> {v}"
-                    for k, v in propiedades.items()
-                ]
+            radio = (
+                8
+                if es_seleccionado
+                else 4
             )
 
             folium.CircleMarker(
@@ -752,38 +716,35 @@ if ver_puntos:
                 ],
                 radius=radio,
                 color="#FFFFFF",
-                weight=1.2,
+                weight=1,
                 fill=True,
                 fill_color=color,
-                fill_opacity=opacidad,
+                fill_opacity=1 if es_seleccionado else 0.85,
                 tooltip=nombre,
-                popup=folium.Popup(
-                    popup_html or nombre,
-                    max_width=350
-                ),
+                popup=nombre,
             ).add_to(mapa)
 
 
 # ============================================================
-# 14. ENFOQUE DE LA SUBCUENCA SELECCIONADA
+# 15. ZOOM A LA SUBCUENCA SELECCIONADA
 # ============================================================
 
 if seleccion is not None:
 
-    nombre_sub, indice_sub = seleccion
-
     for nombre, gdf in capas_subcuencas:
 
-        if nombre == nombre_sub:
+        if nombre == seleccion[0]:
 
-            geometria = gdf.geometry.iloc[indice_sub]
+            geometria = gdf.geometry.iloc[
+                seleccion[1]
+            ]
 
-            xmin, ymin, xmax, ymax = geometria.bounds
+            bx1, by1, bx2, by2 = geometria.bounds
 
             mapa.fit_bounds(
                 [
-                    [ymin, xmin],
-                    [ymax, xmax]
+                    [by1, bx1],
+                    [by2, bx2]
                 ],
                 padding=(35, 35)
             )
@@ -802,7 +763,7 @@ else:
 
 
 # ============================================================
-# 15. CONTROLES
+# 16. CONTROLES
 # ============================================================
 
 Fullscreen(
@@ -815,7 +776,7 @@ folium.LayerControl(
 
 
 # ============================================================
-# 16. MOSTRAR MAPA Y CAPTURAR CLIC
+# 17. VISUALIZAR MAPA
 # ============================================================
 
 st.subheader("Visor geoespacial")
@@ -826,16 +787,25 @@ resultado = st_folium(
     height=720,
     returned_objects=[
         "last_object_clicked",
-        "last_object_clicked_count",
+        "last_object_clicked_count"
     ],
-    key="visor_bid",
+    key="visor_hidrologico_bid"
 )
 
-# Detectar clic sobre una estación.
+
+# ============================================================
+# 18. PROCESAR CLIC SOBRE ESTACIÓN
+# ============================================================
+
 if resultado:
 
-    clic = resultado.get("last_object_clicked")
-    contador = resultado.get("last_object_clicked_count")
+    clic = resultado.get(
+        "last_object_clicked"
+    )
+
+    contador = resultado.get(
+        "last_object_clicked_count"
+    )
 
     if clic and contador is not None:
 
@@ -848,55 +818,52 @@ if resultado:
 
             if lat is not None and lon is not None:
 
-                estacion = buscar_estacion_cercana(
+                estacion = buscar_estacion(
                     lat,
                     lon
                 )
 
                 if estacion is not None:
 
-                    punto_real = estacion[2]
+                    nombre_estacion = estacion[0]
+                    indice_estacion = estacion[1]
+                    geometria = estacion[2]
 
-                    lat_real = punto_real.y
-                    lon_real = punto_real.x
-
-                    nueva_seleccion = buscar_subcuenca(
-                        lat_real,
-                        lon_real
+                    nueva_subcuenca = buscar_subcuenca(
+                        geometria.y,
+                        geometria.x
                     )
 
-                    if nueva_seleccion is not None:
+                    st.session_state.estacion_seleccionada = (
+                        nombre_estacion,
+                        indice_estacion
+                    )
 
-                        st.session_state.punto_seleccionado = {
-                            "lat": lat_real,
-                            "lon": lon_real,
-                        }
+                    st.session_state.subcuenca_seleccionada = (
+                        nueva_subcuenca
+                    )
 
-                        st.session_state.subcuenca_seleccionada = (
-                            nueva_seleccion
-                        )
-
-                        st.rerun()
+                    st.rerun()
 
 
 # ============================================================
-# 17. INFORMACIÓN DE SELECCIÓN
+# 19. INFORMACIÓN DE SELECCIÓN
 # ============================================================
 
-if seleccion is not None:
+if st.session_state.subcuenca_seleccionada:
+
+    nombre_subcuenca = (
+        st.session_state.subcuenca_seleccionada[0]
+    )
 
     st.info(
-        f"Subcuenca seleccionada: **{seleccion[0]}**. "
-        "Se resaltan sus ríos y la estación seleccionada."
+        f"Subcuenca seleccionada: {nombre_subcuenca}"
     )
 
 if errores:
 
     with st.expander("Diagnóstico de archivos"):
 
-        st.warning(
-            f"Se encontraron {len(errores)} errores de lectura."
-        )
-
         for error in errores:
-            st.code(error)
+            st.write(error)
+
