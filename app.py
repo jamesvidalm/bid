@@ -79,6 +79,16 @@ CANDIDATOS_CODIGO = [
 
 CRS_AREA = "EPSG:6933"
 
+# Distancia (grados) estación-borde para considerar que la estación
+# está en la salida de la cuenca (~3 km).
+TOL_SALIDA = 0.03
+
+# Distancia (grados) para considerar válida una cuenca cercana (~2 km).
+TOL_CERCANA = 0.02
+
+# Si la estación está a más de ~5 km del borde, se avisa.
+TOL_AVISO_KM = 5.0
+
 
 # ============================================================
 # 2. UTILIDADES
@@ -446,13 +456,143 @@ def construir_estaciones(clave, _capas_puntos, _paises):
 
 
 # ============================================================
-# 5. FUNCIONES GEOGRÁFICAS
+# 5. ASOCIAR ESTACIÓN -> SUBCUENCA
 # ============================================================
 
-def buscar_cuenca(lat, lon, capas_subcuencas):
+def nombre_corto(nombre_capa):
+    """'carpeta/BID_033 - capa' -> 'BID_033'."""
 
-    punto = Point(lon, lat)
+    return nombre_capa.split("/")[-1].split(" - ")[0]
 
+
+def clave_codigo(texto):
+
+    return re.sub(r"[^A-Z0-9]", "", normalizar(texto))
+
+
+def coincide_codigo(codigo, nombre_capa):
+    """True si el código de la estación corresponde al nombre
+    del archivo/capa de la subcuenca (BID_033 <-> BID_033)."""
+
+    c = clave_codigo(codigo)
+
+    if not c or c == "SD":
+        return False
+
+    s = clave_codigo(nombre_corto(nombre_capa))
+
+    if c == s:
+        return True
+
+    # Código completo dentro del nombre, sin pegarse a otros dígitos
+    # (evita que BID_03 coincida con BID_033).
+    completo = clave_codigo(nombre_capa)
+
+    if re.search(rf"(?<![0-9]){re.escape(c)}(?![0-9])", completo):
+        return True
+
+    # Mismo prefijo y mismo número (BID_33 <-> BID_033).
+    pc = re.match(r"^([A-Z]*)(\d+)$", c)
+    ps = re.match(r"^([A-Z]*)(\d+)$", s)
+
+    if pc and ps and pc.group(1) == ps.group(1):
+        return int(pc.group(2)) == int(ps.group(2))
+
+    return False
+
+
+def distancia_borde(geom, punto):
+
+    try:
+        return float(geom.boundary.distance(punto))
+    except Exception:
+        return float("inf")
+
+
+def elegir_en_capa(gdf, punto):
+    """Dentro de una capa, elige el polígono cuya salida está
+    más cerca de la estación."""
+
+    if len(gdf) == 1:
+        idx = gdf.index[0]
+        return int(idx), distancia_borde(gdf.geometry.loc[idx], punto)
+
+    mejor = None
+    mejor_d = float("inf")
+
+    for idx in gdf.index:
+
+        d = distancia_borde(gdf.geometry.loc[idx], punto)
+
+        if d < mejor_d:
+            mejor_d = d
+            mejor = int(idx)
+
+    return mejor, mejor_d
+
+
+def buscar_cuenca_estacion(est, capas_subcuencas):
+    """Devuelve ((nombre_capa, indice), metodo, dist_borde_grados)."""
+
+    punto = Point(est["lon"], est["lat"])
+
+    # ---- 1. Por código de estación (método exacto) ----
+    coincidencias = [
+        (nombre, gdf)
+        for nombre, gdf in capas_subcuencas
+        if coincide_codigo(est["codigo"], nombre)
+    ]
+
+    if coincidencias:
+
+        # Si hubiera más de una, elegir la de salida más cercana.
+        mejor = None
+
+        for nombre, gdf in coincidencias:
+
+            idx, d = elegir_en_capa(gdf, punto)
+
+            if mejor is None or d < mejor[2]:
+                mejor = (nombre, idx, d)
+
+        return (
+            (mejor[0], mejor[1]),
+            "Por código de estación",
+            mejor[2],
+        )
+
+    # ---- 2. Estación en la salida (borde) de la cuenca ----
+    mejor = None
+
+    for nombre, gdf in capas_subcuencas:
+
+        try:
+
+            posiciones = gdf.sindex.query(
+                punto.buffer(TOL_SALIDA)
+            )
+
+            for pos in posiciones:
+
+                geom = gdf.geometry.iloc[pos]
+                d = distancia_borde(geom, punto)
+
+                if d <= TOL_SALIDA and (
+                    mejor is None or d < mejor[2]
+                ):
+                    mejor = (nombre, int(gdf.index[pos]), d)
+
+        except Exception:
+            continue
+
+    if mejor is not None:
+        return (
+            (mejor[0], mejor[1]),
+            "Estación en la salida de la cuenca",
+            mejor[2],
+        )
+
+    # ---- 3. Polígono más pequeño que contiene la estación ----
     candidatas = []
 
     for nombre, gdf in capas_subcuencas:
@@ -461,25 +601,29 @@ def buscar_cuenca(lat, lon, capas_subcuencas):
 
             mascara = gdf.geometry.covers(punto)
 
-            if mascara.any():
+            for idx in gdf.index[mascara]:
 
-                for indice in gdf.index[mascara]:
+                geom = gdf.geometry.loc[idx]
 
-                    geom = gdf.geometry.loc[indice]
-
-                    candidatas.append(
-                        (geom.area, nombre, int(indice))
-                    )
+                candidatas.append(
+                    (geom.area, nombre, int(idx), distancia_borde(geom, punto))
+                )
 
         except Exception:
             continue
 
     if candidatas:
-        candidatas.sort(key=lambda x: x[0])
-        return (candidatas[0][1], candidatas[0][2])
 
+        candidatas.sort(key=lambda x: x[0])
+
+        return (
+            (candidatas[0][1], candidatas[0][2]),
+            "Polígono más pequeño que contiene la estación",
+            candidatas[0][3],
+        )
+
+    # ---- 4. Cuenca más cercana ----
     mejor = None
-    distancia_minima = float("inf")
 
     for nombre, gdf in capas_subcuencas:
 
@@ -487,20 +631,23 @@ def buscar_cuenca(lat, lon, capas_subcuencas):
 
             distancias = gdf.geometry.distance(punto)
 
-            indice = distancias.idxmin()
-            distancia = float(distancias.loc[indice])
+            idx = distancias.idxmin()
+            d = float(distancias.loc[idx])
 
-            if distancia < distancia_minima:
-                distancia_minima = distancia
-                mejor = (nombre, int(indice))
+            if mejor is None or d < mejor[2]:
+                mejor = (nombre, int(idx), d)
 
         except Exception:
             continue
 
-    if distancia_minima <= 0.02:
-        return mejor
+    if mejor is not None and mejor[2] <= TOL_CERCANA:
+        return (
+            (mejor[0], mejor[1]),
+            "Cuenca más cercana",
+            mejor[2],
+        )
 
-    return None
+    return None, "Sin cuenca asociada", None
 
 
 def obtener_poligono(seleccion, capas_subcuencas):
@@ -944,19 +1091,30 @@ if estacion_sel is not None:
             f"({est['lat']:.5f}, {est['lon']:.5f})"
         )
 
-        # --- Buscar subcuenca ---
-        cuenca = buscar_cuenca(
-            est["lat"],
-            est["lon"],
+        # --- Buscar subcuenca de ESTA estación ---
+        cuenca, metodo, dist_borde = buscar_cuenca_estacion(
+            est,
             capas_subcuencas
         )
 
         poligono = obtener_poligono(cuenca, capas_subcuencas)
 
         if poligono is not None:
-            pasos.append(f"Subcuenca encontrada en: {cuenca[0]} (fila {cuenca[1]})")
+
+            pasos.append(
+                f"Subcuenca asignada: {nombre_corto(cuenca[0])} "
+                f"(fila {cuenca[1]})"
+            )
+            pasos.append(f"Método: {metodo}")
+
+            if dist_borde is not None:
+                pasos.append(
+                    f"Distancia estación → borde de la cuenca: "
+                    f"{dist_borde * 111:.1f} km"
+                )
+
         else:
-            pasos.append("No se encontró subcuenca cercana a la estación.")
+            pasos.append("No se encontró subcuenca para la estación.")
 
         # --- Área ---
         area_km2 = (
@@ -971,7 +1129,9 @@ if estacion_sel is not None:
         if poligono is not None:
             lista_rios = rios_de_cuenca(poligono, capas_rios)
 
-        pasos.append(f"Capas de ríos con tramos en la cuenca: {len(lista_rios)}")
+        pasos.append(
+            f"Capas de ríos con tramos en la cuenca: {len(lista_rios)}"
+        )
 
         col_mapa, col_info = st.columns([3, 2])
 
@@ -1089,7 +1249,6 @@ if estacion_sel is not None:
 
             folium.LayerControl(collapsed=True).add_to(mapa)
 
-            # Se inserta como HTML (más estable que st_folium).
             html_mapa = mapa.get_root().render()
 
             components.html(html_mapa, height=620, scrolling=False)
@@ -1117,7 +1276,27 @@ if estacion_sel is not None:
                     f"Coordenadas: {est['lat']:.5f}, {est['lon']:.5f}"
                 )
 
-            with st.expander("Detalle del proceso"):
+            # Avisos de coherencia.
+            if poligono is not None:
+
+                if metodo != "Por código de estación":
+                    st.warning(
+                        "No hay un archivo de subcuenca con el código "
+                        f"{est['codigo']}. La cuenca se asignó por "
+                        "ubicación; verifica que sea correcta."
+                    )
+
+                if (
+                    dist_borde is not None
+                    and dist_borde * 111 > TOL_AVISO_KM
+                ):
+                    st.warning(
+                        "La estación no está sobre el borde (salida) de "
+                        "esta cuenca. Revisa si el archivo de subcuenca "
+                        "corresponde a la estación."
+                    )
+
+            with st.expander("Detalle del proceso", expanded=True):
 
                 for p in pasos:
                     st.write(p)
@@ -1129,7 +1308,82 @@ if estacion_sel is not None:
 
 
 # ============================================================
-# 13. DIAGNÓSTICO
+# 13. VERIFICACIÓN DE TODAS LAS ESTACIONES
+# ============================================================
+
+st.divider()
+
+with st.expander("Verificar asociación estación → cuenca"):
+
+    st.caption(
+        "Muestra a qué subcuenca se asigna cada estación. "
+        "Las filas con ⚠️ se asignaron por ubicación o quedan lejos "
+        "de la salida de la cuenca: conviene revisarlas."
+    )
+
+    if st.checkbox("Calcular tabla de verificación"):
+
+        filas = []
+
+        for e in sorted(estaciones, key=lambda x: x["codigo"]):
+
+            try:
+
+                cuenca_e, metodo_e, dist_e = buscar_cuenca_estacion(
+                    e,
+                    capas_subcuencas
+                )
+
+            except Exception as exc:
+
+                cuenca_e, metodo_e, dist_e = None, f"Error: {exc}", None
+
+            dist_km = (
+                round(dist_e * 111, 1)
+                if dist_e is not None
+                else None
+            )
+
+            revisar = (
+                cuenca_e is None
+                or metodo_e != "Por código de estación"
+                or (dist_km is not None and dist_km > TOL_AVISO_KM)
+            )
+
+            filas.append(
+                {
+                    "Revisar": "⚠️" if revisar else "✔",
+                    "Código estación": e["codigo"],
+                    "Nombre": e["nombre"],
+                    "País": e["pais"],
+                    "Subcuenca asignada": (
+                        nombre_corto(cuenca_e[0])
+                        if cuenca_e is not None
+                        else "—"
+                    ),
+                    "Método": metodo_e,
+                    "Dist. al borde (km)": dist_km,
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(filas),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("Archivos de subcuencas detectados"):
+
+            st.write(
+                ", ".join(
+                    nombre_corto(n) for n, _ in capas_subcuencas
+                )
+                or "Ninguno"
+            )
+
+
+# ============================================================
+# 14. DIAGNÓSTICO
 # ============================================================
 
 if errores:
