@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Dashboard BID - lectura directa desde los archivos del repositorio GitHub.
-NO convierte archivos. Lee:
-  puntos/*.shp
-  sudamerica/*.shp
-  subcuencas/*.gpkg y todas sus capas internas
+Dashboard BID: Modelamiento Hidrológico de las Cuencas Andino-Amazónicas
+Lee directamente los archivos guardados en el repositorio GitHub.
+
+Estructura esperada:
+    app.py
+    requirements.txt
+    puntos/       -> archivos .shp
+    sudamerica/   -> archivos .shp
+    subcuencas/   -> archivos .gpkg
+
+No requiere Fiona ni convierte los archivos.
 """
 
 from pathlib import Path
 import hashlib
+import json
 import warnings
 
 import streamlit as st
@@ -21,8 +28,15 @@ from streamlit_folium import st_folium
 warnings.filterwarnings("ignore")
 
 # ============================================================
-# CONFIGURACIÓN
+# 1. CONFIGURACIÓN
 # ============================================================
+
+st.set_page_config(
+    page_title="Modelamiento Hidrológico Andino-Amazónico",
+    page_icon="🌎",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 ROOT = Path(__file__).resolve().parent
 DIR_PUNTOS = ROOT / "puntos"
@@ -43,60 +57,65 @@ PALETA = [
     "#666666", "#17becf", "#bcbd22", "#8c564b", "#ff9896",
 ]
 
-st.set_page_config(
-    page_title="Modelamiento Hidrológico Andino-Amazónico",
-    page_icon="🌎",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 
 # ============================================================
-# FUNCIONES
+# 2. FUNCIONES AUXILIARES
 # ============================================================
 
 def color_estable(nombre):
+    """Asigna siempre el mismo color a una capa."""
     numero = int(hashlib.md5(nombre.encode("utf-8")).hexdigest()[:8], 16)
     return PALETA[numero % len(PALETA)]
 
 
-def buscar_archivos(carpeta, extensiones):
+def buscar_archivos(carpeta, extension):
+    """Busca archivos recursivamente dentro de una carpeta."""
     if not carpeta.exists():
         return []
-    archivos = []
-    for extension in extensiones:
-        archivos.extend(carpeta.rglob(f"*{extension}"))
-    return sorted(set(archivos), key=lambda p: str(p).lower())
+    return sorted(
+        carpeta.rglob(f"*{extension}"),
+        key=lambda ruta: str(ruta).lower()
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=80)
-def leer_shapefile(ruta, mtime):
+def leer_shapefile(ruta, modificacion):
+    """Lee un Shapefile mediante Pyogrio."""
     return gpd.read_file(ruta, engine="pyogrio")
 
 
-@st.cache_data(show_spinner=False, max_entries=120)
-def leer_gpkg_capa(ruta, capa, mtime):
-    return gpd.read_file(ruta, layer=capa, engine="pyogrio")
+@st.cache_data(show_spinner=False, max_entries=150)
+def leer_gpkg_capa(ruta, nombre_capa, modificacion):
+    """Lee una capa específica de un GeoPackage mediante Pyogrio."""
+    return gpd.read_file(
+        ruta,
+        layer=nombre_capa,
+        engine="pyogrio"
+    )
 
 
 def preparar_gdf(gdf):
+    """Valida, reproyecta y simplifica una capa para visualizarla."""
     if gdf is None or gdf.empty:
         raise ValueError("La capa no contiene registros.")
 
     if gdf.crs is None:
-        raise ValueError("El archivo no tiene CRS definido.")
+        raise ValueError("El archivo no tiene sistema de coordenadas (CRS).")
+
+    if gdf.geometry.name not in gdf.columns:
+        raise ValueError("No se encontró la columna de geometría.")
 
     gdf = gdf[gdf.geometry.notna()].copy()
     gdf = gdf[~gdf.geometry.is_empty].copy()
 
     if gdf.empty:
-        raise ValueError("La capa no contiene geometrías válidas.")
+        raise ValueError("La capa no contiene geometrías utilizables.")
 
+    # Todas las capas se llevan a coordenadas geográficas WGS84.
     if gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(epsg=4326)
 
-    # Simplifica solo la geometría que se dibuja en el mapa.
-    # Los archivos originales de GitHub no se modifican.
+    # Simplificación para reducir el peso del mapa web.
     try:
         gdf.geometry = gdf.geometry.simplify(
             tolerance=0.0003,
@@ -109,22 +128,26 @@ def preparar_gdf(gdf):
 
 
 def campos_visibles(gdf, limite=5):
-    salida = []
+    """Selecciona atributos útiles para mostrar en tooltip y popup."""
+    campos = []
     for campo in gdf.columns:
         if campo == gdf.geometry.name:
             continue
         try:
             if gdf[campo].notna().any():
-                salida.append(campo)
+                campos.append(campo)
         except Exception:
             continue
-        if len(salida) >= limite:
+
+        if len(campos) >= limite:
             break
-    return salida
+
+    return campos
 
 
 def opciones_popup(gdf):
     campos = campos_visibles(gdf)
+
     if not campos:
         return None, None
 
@@ -134,22 +157,30 @@ def opciones_popup(gdf):
         sticky=True,
         localize=True,
     )
+
     popup = folium.GeoJsonPopup(
         fields=campos,
         aliases=[f"{campo}:" for campo in campos],
         localize=True,
         max_width=350,
     )
+
     return tooltip, popup
+
+
+def convertir_geojson(gdf):
+    """Convierte la capa a GeoJSON para Folium."""
+    # json.loads permite entregar a Folium un objeto GeoJSON válido.
+    return json.loads(gdf.to_json(drop_id=True, na="null"))
 
 
 def agregar_poligono(mapa, gdf, nombre, color):
     tooltip, popup = opciones_popup(gdf)
 
     folium.GeoJson(
-        data=gdf.to_json(),
+        data=convertir_geojson(gdf),
         name=nombre,
-        style_function=lambda feature: {
+        style_function=lambda feature, color=color: {
             "color": color,
             "weight": 1.2,
             "fillColor": color,
@@ -171,7 +202,7 @@ def agregar_puntos(mapa, gdf, nombre):
     tooltip, popup = opciones_popup(gdf)
 
     folium.GeoJson(
-        data=gdf.to_json(),
+        data=convertir_geojson(gdf),
         name=nombre,
         marker=folium.CircleMarker(
             radius=5,
@@ -188,19 +219,33 @@ def agregar_puntos(mapa, gdf, nombre):
 
 
 def calcular_extension(lista_gdf):
+    """Calcula el centro y los límites de todas las capas."""
     if not lista_gdf:
         return [-4.0, -75.0], None
 
-    bounds = [gdf.total_bounds for gdf in lista_gdf]
-    xmin = min(b[0] for b in bounds)
-    ymin = min(b[1] for b in bounds)
-    xmax = max(b[2] for b in bounds)
-    ymax = max(b[3] for b in bounds)
+    limites = []
+    for gdf in lista_gdf:
+        bounds = gdf.total_bounds
+        if len(bounds) == 4 and all(map(lambda x: x == x, bounds)):
+            limites.append(bounds)
+
+    if not limites:
+        return [-4.0, -75.0], None
+
+    xmin = min(b[0] for b in limites)
+    ymin = min(b[1] for b in limites)
+    xmax = max(b[2] for b in limites)
+    ymax = max(b[3] for b in limites)
 
     centro = [(ymin + ymax) / 2, (xmin + xmax) / 2]
     extension = [[ymin, xmin], [ymax, xmax]]
+
     return centro, extension
 
+
+# ============================================================
+# 3. CARGA DE SHAPEFILES Y GEOPACKAGES
+# ============================================================
 
 def cargar_shapefiles(archivos, etiqueta):
     capas = []
@@ -208,7 +253,10 @@ def cargar_shapefiles(archivos, etiqueta):
 
     for archivo in archivos:
         try:
-            gdf = leer_shapefile(str(archivo), archivo.stat().st_mtime)
+            gdf = leer_shapefile(
+                str(archivo),
+                archivo.stat().st_mtime
+            )
             gdf = preparar_gdf(gdf)
             capas.append((archivo.stem, gdf))
         except Exception as error:
@@ -223,14 +271,18 @@ def cargar_geopackages(archivos):
 
     for archivo in archivos:
         try:
-            nombres = pyogrio.list_layers(archivo)
-            nombres = [str(fila[0]) for fila in nombres]
+            # Devuelve las capas internas del GeoPackage.
+            listado = pyogrio.list_layers(str(archivo))
+            nombres_capas = [
+                str(fila[0]) for fila in listado
+                if fila[0] is not None
+            ]
 
-            if not nombres:
+            if not nombres_capas:
                 errores.append(f"{archivo.name}: no contiene capas.")
                 continue
 
-            for nombre_capa in nombres:
+            for nombre_capa in nombres_capas:
                 try:
                     gdf = leer_gpkg_capa(
                         str(archivo),
@@ -238,8 +290,10 @@ def cargar_geopackages(archivos):
                         archivo.stat().st_mtime
                     )
                     gdf = preparar_gdf(gdf)
+
                     nombre_mapa = f"{archivo.stem} - {nombre_capa}"
                     capas.append((nombre_mapa, gdf))
+
                 except Exception as error:
                     errores.append(
                         f"{archivo.name} / {nombre_capa}: {error}"
@@ -252,7 +306,7 @@ def cargar_geopackages(archivos):
 
 
 # ============================================================
-# ENCABEZADO
+# 4. ENCABEZADO
 # ============================================================
 
 st.markdown(
@@ -277,16 +331,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ============================================================
-# ARCHIVOS EN EL REPOSITORIO
-# ============================================================
-
-archivos_puntos = buscar_archivos(DIR_PUNTOS, [".shp"])
-archivos_sudamerica = buscar_archivos(DIR_SUDAMERICA, [".shp"])
-archivos_gpkg = buscar_archivos(DIR_SUBCUENCAS, [".gpkg"])
 
 # ============================================================
-# PANEL LATERAL
+# 5. DETECTAR ARCHIVOS DEL REPOSITORIO
+# ============================================================
+
+archivos_puntos = buscar_archivos(DIR_PUNTOS, ".shp")
+archivos_sudamerica = buscar_archivos(DIR_SUDAMERICA, ".shp")
+archivos_gpkg = buscar_archivos(DIR_SUBCUENCAS, ".gpkg")
+
+
+# ============================================================
+# 6. PANEL LATERAL
 # ============================================================
 
 st.sidebar.title("🗺️ Panel de capas")
@@ -306,27 +362,32 @@ if st.sidebar.button("🔄 Recargar archivos", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
+
 # ============================================================
-# CARGA DE CAPAS
+# 7. LEER CAPAS
 # ============================================================
 
 with st.spinner("Leyendo directamente los archivos del repositorio..."):
     capas_sudamerica, errores_base = cargar_shapefiles(
-        archivos_sudamerica, "Sudamérica"
+        archivos_sudamerica,
+        "Sudamérica"
     )
+
     capas_puntos, errores_puntos = cargar_shapefiles(
-        archivos_puntos, "Puntos"
+        archivos_puntos,
+        "Puntos"
     )
+
     capas_subcuencas, errores_gpkg = cargar_geopackages(archivos_gpkg)
 
 errores = errores_base + errores_puntos + errores_gpkg
 
+
 # ============================================================
-# INDICADORES
+# 8. INDICADORES
 # ============================================================
 
 total_puntos = sum(len(gdf) for _, gdf in capas_puntos)
-total_elementos = sum(len(gdf) for _, gdf in capas_subcuencas)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Capas de Sudamérica", len(capas_sudamerica))
@@ -334,8 +395,9 @@ c2.metric("Estaciones", f"{total_puntos:,}")
 c3.metric("Archivos GPKG", len(archivos_gpkg))
 c4.metric("Capas hidrográficas", len(capas_subcuencas))
 
+
 # ============================================================
-# MAPA
+# 9. MAPA
 # ============================================================
 
 st.subheader("Visor geoespacial")
@@ -376,13 +438,19 @@ folium.TileLayer(
 if ver_sudamerica:
     for nombre, gdf in capas_sudamerica:
         agregar_poligono(
-            mapa, gdf, f"Sudamérica - {nombre}", "#263746"
+            mapa,
+            gdf,
+            f"Sudamérica - {nombre}",
+            "#263746"
         )
 
 if ver_cuencas:
     for nombre, gdf in capas_subcuencas:
         agregar_poligono(
-            mapa, gdf, nombre, color_estable(nombre)
+            mapa,
+            gdf,
+            nombre,
+            color_estable(nombre)
         )
 
 if ver_puntos:
@@ -390,12 +458,14 @@ if ver_puntos:
         agregar_puntos(mapa, gdf, nombre)
 
 Fullscreen(position="topleft").add_to(mapa)
+
 MousePosition(
     position="bottomright",
     prefix="Coordenadas",
     separator=" | ",
     num_digits=5,
 ).add_to(mapa)
+
 MiniMap(toggle_display=True, minimized=True).add_to(mapa)
 folium.LayerControl(collapsed=False).add_to(mapa)
 
@@ -410,11 +480,13 @@ st_folium(
     key="visor_hidrologico_bid",
 )
 
+
 # ============================================================
-# LEYENDA
+# 10. LEYENDA
 # ============================================================
 
 st.subheader("Leyenda de capas")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -424,6 +496,7 @@ with col1:
         'background:#263746;margin-right:8px;"></span>Sudamérica',
         unsafe_allow_html=True,
     )
+
     st.markdown("**Estaciones hidrológicas**")
     st.markdown(
         '<span style="display:inline-block;width:12px;height:12px;'
@@ -442,8 +515,9 @@ with col2:
             unsafe_allow_html=True,
         )
 
+
 # ============================================================
-# DIAGNÓSTICO DE ARCHIVOS
+# 11. DIAGNÓSTICO
 # ============================================================
 
 with st.expander("Diagnóstico de lectura de archivos"):
@@ -457,6 +531,11 @@ with st.expander("Diagnóstico de lectura de archivos"):
             st.code(error)
     else:
         st.success("Todos los archivos detectados se leyeron correctamente.")
+
+
+# ============================================================
+# 12. PIE DE PÁGINA
+# ============================================================
 
 st.markdown(
     """
