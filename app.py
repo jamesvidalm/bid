@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+import colorsys
 import hashlib
 import warnings
 
@@ -35,15 +36,8 @@ CARPETAS = {
     "sudamerica": ROOT / "sudamerica",
 }
 
-PALETA = [
-    "#77A6A1", "#9A8DB4", "#BCA078", "#85A9C7",
-    "#B68F9F", "#9DB27E", "#8E9EBC", "#C0A58B",
-    "#78B2AA", "#A59B78", "#90B1A0", "#B49AC0",
-    "#87A4BC", "#AAB78C", "#C0A0A0", "#83AFA1",
-    "#A5A0C0", "#C2B080", "#8DB9B1", "#B3A3A0",
-]
-
-COLOR_CUENCA_ACTIVA = "#F4B400"
+COLOR_CUENCA_ACTIVA = "#FFC400"
+COLOR_BORDE_ACTIVO = "#FFFFFF"
 COLOR_RIO_ACTIVO = "#00BFFF"
 COLOR_RIO_NORMAL = "#8FB9C9"
 COLOR_ESTACION = "#D9534F"
@@ -54,6 +48,9 @@ CAMPOS_NOMBRE = [
     "Nombre", "NOMBRE", "nombre",
     "Codigo", "CODIGO", "codigo",
 ]
+
+# Proyección de área equivalente para calcular superficies.
+CRS_AREA = "EPSG:6933"
 
 
 # ============================================================
@@ -75,18 +72,20 @@ def buscar_archivos(carpeta):
     )
 
 
-def color_cuenca(nombre):
+def color_por_indice(i, desplazamiento=0):
+    """Color distinto por polígono (espaciado por proporción áurea)."""
 
-    valor = int(
-        hashlib.md5(nombre.encode("utf-8")).hexdigest()[:8],
-        16
+    hue = ((i + desplazamiento) * 0.61803398875) % 1.0
+    sat = 0.50 + 0.18 * ((i * 7) % 3) / 2
+    val = 0.88 - 0.10 * ((i * 5) % 3) / 2
+
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+
+    return "#{:02X}{:02X}{:02X}".format(
+        int(r * 255), int(g * 255), int(b * 255)
     )
 
-    return PALETA[valor % len(PALETA)]
 
-
-# cache_resource evita copiar el GeoDataFrame en cada rerun
-# (cache_data copia todo y consume mucha memoria).
 @st.cache_resource(show_spinner=False, max_entries=60)
 def leer_archivo(ruta, capa, modificacion):
 
@@ -136,7 +135,6 @@ def preparar_archivo(ruta, capa, modificacion, tipo):
         except Exception:
             pass
 
-    # Conservar geometría y hasta tres atributos.
     geom_col = gdf.geometry.name
 
     atributos = [
@@ -151,7 +149,8 @@ def preparar_archivo(ruta, capa, modificacion, tipo):
 
 @st.cache_resource(show_spinner=False, max_entries=120)
 def geojson_capa(tipo, nombre, _gdf):
-    """GeoJSON (solo geometría) cacheado y con coordenadas redondeadas."""
+    """GeoJSON (solo geometría) cacheado, coordenadas redondeadas.
+    Para subcuencas añade una propiedad 'color' distinta por polígono."""
 
     geom_col = _gdf.geometry.name
     solo_geom = _gdf[[geom_col]].copy()
@@ -160,11 +159,22 @@ def geojson_capa(tipo, nombre, _gdf):
         solo_geom.geometry = solo_geom.geometry.set_precision(
             grid_size=0.00001
         )
-        solo_geom = solo_geom[
-            ~solo_geom.geometry.is_empty
-        ]
+        solo_geom = solo_geom[~solo_geom.geometry.is_empty]
     except Exception:
         pass
+
+    if tipo == "subcuencas":
+
+        desplazamiento = int(
+            hashlib.md5(nombre.encode("utf-8")).hexdigest()[:4], 16
+        ) % 997
+
+        solo_geom = solo_geom.reset_index(drop=True)
+
+        solo_geom["color"] = [
+            color_por_indice(i, desplazamiento)
+            for i in range(len(solo_geom))
+        ]
 
     return solo_geom.to_json(drop_id=True)
 
@@ -254,7 +264,6 @@ def buscar_estacion(lat, lon, capas_puntos):
                 distancia_minima = distancia
                 mejor = (nombre, indice, geom)
 
-    # Tolerancia aproximada de 2 km.
     if distancia_minima > 0.02:
         return None
 
@@ -330,6 +339,16 @@ def obtener_poligono(seleccion, capas_subcuencas):
                 return gdf.geometry.loc[indice_buscado]
 
     return None
+
+
+def calcular_area_km2(poligono):
+    """Área del polígono en km² usando proyección de área equivalente."""
+
+    try:
+        serie = gpd.GeoSeries([poligono], crs="EPSG:4326")
+        return float(serie.to_crs(CRS_AREA).area.iloc[0]) / 1_000_000
+    except Exception:
+        return None
 
 
 def extension_general(capas):
@@ -448,7 +467,7 @@ total_estaciones = sum(len(gdf) for _, gdf in capas_puntos)
 c1, c2, c3 = st.columns(3)
 
 c1.metric("Estaciones", total_estaciones)
-c2.metric("Subcuencas", len(capas_subcuencas))
+c2.metric("Archivos de subcuencas", len(capas_subcuencas))
 c3.metric("Capas de ríos", len(capas_rios))
 
 
@@ -459,6 +478,12 @@ c3.metric("Capas de ríos", len(capas_rios))
 seleccion = st.session_state.cuenca_activa
 
 poligono_activo = obtener_poligono(seleccion, capas_subcuencas)
+
+area_activa_km2 = (
+    calcular_area_km2(poligono_activo)
+    if poligono_activo is not None
+    else None
+)
 
 capas_todas = (
     capas_sudamerica
@@ -518,7 +543,7 @@ if ver_sudamerica:
 
 
 # ============================================================
-# 11. SUBCUENCAS (ATENUADAS SI HAY SELECCIÓN)
+# 11. SUBCUENCAS: UN COLOR DISTINTO POR POLÍGONO
 # ============================================================
 
 if ver_subcuencas:
@@ -527,18 +552,15 @@ if ver_subcuencas:
 
     for nombre, gdf in capas_subcuencas:
 
-        color = color_cuenca(nombre)
-
         folium.GeoJson(
             geojson_capa("subcuencas", nombre, gdf),
-            style_function=lambda f, c=color: {
-                "color": c,
-                "weight": 0.8,
-                "opacity": 0.55 if seleccion is None else 0.22,
-                "fillColor": c,
-                "fillOpacity": 0.10 if seleccion is None else 0.025,
+            style_function=lambda f: {
+                "color": f["properties"].get("color", "#888888"),
+                "weight": 1.0 if seleccion is None else 0.5,
+                "opacity": 0.85 if seleccion is None else 0.20,
+                "fillColor": f["properties"].get("color", "#888888"),
+                "fillOpacity": 0.45 if seleccion is None else 0.05,
             },
-            tooltip=nombre,
         ).add_to(grupo_cuencas)
 
     grupo_cuencas.add_to(mapa)
@@ -559,16 +581,15 @@ if ver_rios:
             style_function=lambda f: {
                 "color": COLOR_RIO_NORMAL,
                 "weight": 1.2,
-                "opacity": 0.48 if seleccion is None else 0.14,
+                "opacity": 0.55 if seleccion is None else 0.12,
             },
-            tooltip=nombre,
         ).add_to(grupo_rios)
 
     grupo_rios.add_to(mapa)
 
 
 # ============================================================
-# 13. CUENCA SELECCIONADA
+# 13. CUENCA SELECCIONADA (RESALTADA + ÁREA)
 # ============================================================
 
 if poligono_activo is not None:
@@ -578,20 +599,40 @@ if poligono_activo is not None:
         show=True
     )
 
+    texto_area = (
+        f"Área: {area_activa_km2:,.2f} km²"
+        if area_activa_km2 is not None
+        else "Área no disponible"
+    )
+
+    feature_activo = {
+        "type": "Feature",
+        "geometry": poligono_activo.__geo_interface__,
+        "properties": {},
+    }
+
+    # Capa inferior: brillo/halo blanco.
     folium.GeoJson(
-        {
-            "type": "Feature",
-            "geometry": poligono_activo.__geo_interface__,
-            "properties": {"Codigo": seleccion[0]},
-        },
+        feature_activo,
         style_function=lambda f: {
-            "color": COLOR_CUENCA_ACTIVA,
-            "weight": 3.5,
+            "color": COLOR_BORDE_ACTIVO,
+            "weight": 9,
+            "opacity": 0.35,
+            "fillOpacity": 0,
+        },
+    ).add_to(grupo_activo)
+
+    # Capa superior: relleno dorado con borde blanco.
+    folium.GeoJson(
+        feature_activo,
+        style_function=lambda f: {
+            "color": COLOR_BORDE_ACTIVO,
+            "weight": 3,
             "opacity": 1,
             "fillColor": COLOR_CUENCA_ACTIVA,
-            "fillOpacity": 0.35,
+            "fillOpacity": 0.45,
         },
-        tooltip=f"Subcuenca: {seleccion[0]}",
+        tooltip=texto_area,
     ).add_to(grupo_activo)
 
     grupo_activo.add_to(mapa)
@@ -643,7 +684,6 @@ if ver_rios and poligono_activo is not None:
                     "weight": 3,
                     "opacity": 1,
                 },
-                tooltip=nombre,
             ).add_to(grupo_rios_activos)
 
         except Exception:
@@ -690,9 +730,9 @@ if ver_puntos:
 
             folium.CircleMarker(
                 location=[geom.y, geom.x],
-                radius=7 if activa else 4,
+                radius=8 if activa else 4,
                 color="#FFFFFF",
-                weight=1.5,
+                weight=2 if activa else 1.5,
                 fill=True,
                 fill_color=(
                     COLOR_ESTACION_ACTIVA
@@ -741,7 +781,7 @@ st.subheader("Visor geoespacial")
 
 st.caption(
     "Haz clic en una estación roja para resaltar "
-    "su subcuenca y los ríos correspondientes."
+    "su subcuenca y ver su área."
 )
 
 resultado = st_folium(
@@ -797,15 +837,15 @@ if resultado:
 
 
 # ============================================================
-# 20. INFORMACIÓN DE LA SELECCIÓN
+# 20. ÁREA DE LA SELECCIÓN
 # ============================================================
 
 if st.session_state.cuenca_activa is not None:
 
-    st.success(
-        f"Subcuenca seleccionada: "
-        f"{st.session_state.cuenca_activa[0]}"
-    )
+    if area_activa_km2 is not None:
+        st.success(f"Área de la subcuenca: {area_activa_km2:,.2f} km²")
+    else:
+        st.warning("No se pudo calcular el área de la subcuenca.")
 
 elif st.session_state.estacion_activa is not None:
 
