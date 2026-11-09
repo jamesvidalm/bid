@@ -1,29 +1,9 @@
-# -*- coding: utf-8 -*-
-"""
-DASHBOARD BID
-Modelamiento Hidrológico de las Cuencas Andino-Amazónicas
-Ecuador, Perú y Bolivia.
-
-Lee directamente:
-    puntos/*.shp
-    sudamerica/*.shp
-    subcuencas/*.gpkg
-
-Motor de lectura: Pyogrio.
-No utiliza Fiona.
-"""
-
-from pathlib import Path
-import hashlib
-import json
-import warnings
-import fiona
-
 import streamlit as st
 import geopandas as gpd
 import pyogrio
 import folium
 
+from pathlib import Path
 from folium.plugins import Fullscreen, MousePosition, MiniMap
 from streamlit_folium import st_folium
 
