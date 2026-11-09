@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parent
 CARPETAS = {
     "puntos": ROOT / "puntos",
     "rios": ROOT / "rios",
+    "rios_subcuencas": ROOT / "rios_subcuencas",
     "subcuencas": ROOT / "subcuencas",
     "sudamerica": ROOT / "sudamerica",
 }
@@ -183,7 +184,7 @@ def buscar_archivos(carpeta):
     )
 
 
-@st.cache_resource(show_spinner=False, max_entries=60)
+@st.cache_resource(show_spinner=False, max_entries=120)
 def leer_archivo(ruta, capa, modificacion):
 
     if capa is None:
@@ -192,7 +193,7 @@ def leer_archivo(ruta, capa, modificacion):
     return gpd.read_file(ruta, layer=capa, engine="pyogrio")
 
 
-@st.cache_resource(show_spinner=False, max_entries=60)
+@st.cache_resource(show_spinner=False, max_entries=120)
 def preparar_archivo(ruta, capa, modificacion, tipo):
 
     gdf = leer_archivo(ruta, capa, modificacion)
@@ -215,6 +216,7 @@ def preparar_archivo(ruta, capa, modificacion, tipo):
     tolerancias = {
         "puntos": 0,
         "rios": 0.0002,
+        "rios_subcuencas": 0.0001,
         "subcuencas": 0.0004,
         "sudamerica": 0.001,
     }
@@ -471,8 +473,8 @@ def clave_codigo(texto):
 
 
 def coincide_codigo(codigo, nombre_capa):
-    """True si el código de la estación corresponde al nombre
-    del archivo/capa de la subcuenca (BID_033 <-> BID_033)."""
+    """True si el código corresponde al nombre del archivo/capa
+    (BID_033 <-> BID_033)."""
 
     c = clave_codigo(codigo)
 
@@ -545,7 +547,6 @@ def buscar_cuenca_estacion(est, capas_subcuencas):
 
     if coincidencias:
 
-        # Si hubiera más de una, elegir la de salida más cercana.
         mejor = None
 
         for nombre, gdf in coincidencias:
@@ -676,8 +677,45 @@ def calcular_area_km2(poligono):
         return None
 
 
-def rios_de_cuenca(poligono, capas_rios):
-    """Tramos de río dentro de la cuenca, como lista de GeoJSON."""
+# ============================================================
+# 5b. RÍO QUE CORRESPONDE A LA CUENCA (carpeta rios_subcuencas)
+# ============================================================
+
+def base_nombre_rio(nombre_capa):
+    """'ALT_001_RIO' -> 'ALT_001' (quita el sufijo _RIO / _RIOS)."""
+
+    n = nombre_corto(nombre_capa)
+
+    return re.sub(r"[\s_\-\.]*RIOS?$", "", n, flags=re.IGNORECASE)
+
+
+def buscar_rio_de_cuenca(cuenca, est, capas_rios_sub):
+    """Devuelve la lista de (nombre_capa, gdf) de la carpeta
+    rios_subcuencas que corresponde a la cuenca (o a la estación)."""
+
+    referencias = []
+
+    if cuenca is not None:
+        referencias.append(nombre_corto(cuenca[0]))
+
+    referencias.append(est["codigo"])
+
+    for ref in referencias:
+
+        encontrados = [
+            (nombre, gdf)
+            for nombre, gdf in capas_rios_sub
+            if coincide_codigo(ref, base_nombre_rio(nombre))
+        ]
+
+        if encontrados:
+            return encontrados, ref
+
+    return [], None
+
+
+def rios_generales_recortados(poligono, capas_rios):
+    """Respaldo: ríos de la carpeta 'rios' recortados a la cuenca."""
 
     resultado = []
 
@@ -942,8 +980,9 @@ with st.spinner("Leyendo capas geográficas..."):
     capas_subcuencas, e2 = cargar_carpeta("subcuencas")
     capas_rios, e3 = cargar_carpeta("rios")
     capas_puntos, e4 = cargar_carpeta("puntos")
+    capas_rios_sub, e5 = cargar_carpeta("rios_subcuencas")
 
-errores = e1 + e2 + e3 + e4
+errores = e1 + e2 + e3 + e4 + e5
 
 clave_sud = firma(capas_sudamerica)
 clave_sub = firma(capas_subcuencas)
@@ -983,6 +1022,12 @@ if paises_gdf.empty:
         "No se pudo identificar la columna de países en el shape de "
         "Sudamérica. Revisa que la carpeta 'sudamerica' tenga una "
         "columna con los nombres de los países."
+    )
+
+if not capas_rios_sub:
+    st.warning(
+        "No se encontraron archivos en la carpeta 'rios_subcuencas'. "
+        "En el mapa de cuenca se usarán los ríos generales."
     )
 
 
@@ -1123,15 +1168,41 @@ if estacion_sel is not None:
             else None
         )
 
-        # --- Ríos de la cuenca ---
+        # --- Río de ESTA cuenca (carpeta rios_subcuencas) ---
         lista_rios = []
+        rio_propio = False
 
-        if poligono is not None:
-            lista_rios = rios_de_cuenca(poligono, capas_rios)
-
-        pasos.append(
-            f"Capas de ríos con tramos en la cuenca: {len(lista_rios)}"
+        rios_encontrados, ref_usada = buscar_rio_de_cuenca(
+            cuenca,
+            est,
+            capas_rios_sub
         )
+
+        if rios_encontrados:
+
+            rio_propio = True
+
+            for nombre_rio, gdf_rio in rios_encontrados:
+
+                lista_rios.append(
+                    gdf_rio[[gdf_rio.geometry.name]].to_json(drop_id=True)
+                )
+
+            pasos.append(
+                "Río cargado: "
+                + ", ".join(nombre_corto(n) for n, _ in rios_encontrados)
+                + f" (coincide con {ref_usada})"
+            )
+
+        else:
+
+            if poligono is not None:
+                lista_rios = rios_generales_recortados(poligono, capas_rios)
+
+            pasos.append(
+                "No hay archivo de río en 'rios_subcuencas' para esta "
+                "cuenca; se usan los ríos generales recortados."
+            )
 
         col_mapa, col_info = st.columns([3, 2])
 
@@ -1207,24 +1278,26 @@ if estacion_sel is not None:
 
                 grupo_cuenca.add_to(mapa)
 
-                # Ríos dentro de la cuenca.
-                grupo_rios = folium.FeatureGroup(
-                    name="Ríos de la cuenca",
-                    show=True
-                )
+            # Ríos de la cuenca.
+            grupo_rios = folium.FeatureGroup(
+                name="Ríos de la cuenca",
+                show=True
+            )
 
-                for geojson in lista_rios:
+            for geojson in lista_rios:
 
-                    folium.GeoJson(
-                        geojson,
-                        style_function=lambda f: {
-                            "color": COLOR_RIO_ACTIVO,
-                            "weight": 3,
-                            "opacity": 1,
-                        },
-                    ).add_to(grupo_rios)
+                folium.GeoJson(
+                    geojson,
+                    style_function=lambda f: {
+                        "color": COLOR_RIO_ACTIVO,
+                        "weight": 3,
+                        "opacity": 1,
+                    },
+                ).add_to(grupo_rios)
 
-                grupo_rios.add_to(mapa)
+            grupo_rios.add_to(mapa)
+
+            if poligono is not None:
 
                 bx1, by1, bx2, by2 = poligono.bounds
 
@@ -1232,165 +1305,3 @@ if estacion_sel is not None:
                     [[by1, bx1], [by2, bx2]],
                     padding=(30, 30)
                 )
-
-            # Estación seleccionada.
-            folium.CircleMarker(
-                location=[est["lat"], est["lon"]],
-                radius=8,
-                color="#FFFFFF",
-                weight=2,
-                fill=True,
-                fill_color=COLOR_ESTACION_ACTIVA,
-                fill_opacity=1,
-                tooltip=f"{est['codigo']} — {est['nombre']}",
-            ).add_to(mapa)
-
-            Fullscreen(position="topleft").add_to(mapa)
-
-            folium.LayerControl(collapsed=True).add_to(mapa)
-
-            html_mapa = mapa.get_root().render()
-
-            components.html(html_mapa, height=620, scrolling=False)
-
-        # ---------------- CARACTERÍSTICAS ----------------
-
-        with col_info:
-
-            st.markdown("#### Características de la cuenca")
-
-            with st.container(border=True):
-
-                st.markdown(f"**País**  \n{est['pais']}")
-                st.markdown(f"**Código de la estación**  \n{est['codigo']}")
-                st.markdown(f"**Nombre de la estación**  \n{est['nombre']}")
-
-                if area_km2 is not None:
-                    st.metric("Área de la cuenca", f"{area_km2:,.2f} km²")
-                else:
-                    st.warning(
-                        "No se encontró una subcuenca para esta estación."
-                    )
-
-                st.caption(
-                    f"Coordenadas: {est['lat']:.5f}, {est['lon']:.5f}"
-                )
-
-            # Avisos de coherencia.
-            if poligono is not None:
-
-                if metodo != "Por código de estación":
-                    st.warning(
-                        "No hay un archivo de subcuenca con el código "
-                        f"{est['codigo']}. La cuenca se asignó por "
-                        "ubicación; verifica que sea correcta."
-                    )
-
-                if (
-                    dist_borde is not None
-                    and dist_borde * 111 > TOL_AVISO_KM
-                ):
-                    st.warning(
-                        "La estación no está sobre el borde (salida) de "
-                        "esta cuenca. Revisa si el archivo de subcuenca "
-                        "corresponde a la estación."
-                    )
-
-            with st.expander("Detalle del proceso", expanded=True):
-
-                for p in pasos:
-                    st.write(p)
-
-    except Exception as exc:
-
-        st.error("Ocurrió un error al cargar la cuenca de esta estación:")
-        st.exception(exc)
-
-
-# ============================================================
-# 13. VERIFICACIÓN DE TODAS LAS ESTACIONES
-# ============================================================
-
-st.divider()
-
-with st.expander("Verificar asociación estación → cuenca"):
-
-    st.caption(
-        "Muestra a qué subcuenca se asigna cada estación. "
-        "Las filas con ⚠️ se asignaron por ubicación o quedan lejos "
-        "de la salida de la cuenca: conviene revisarlas."
-    )
-
-    if st.checkbox("Calcular tabla de verificación"):
-
-        filas = []
-
-        for e in sorted(estaciones, key=lambda x: x["codigo"]):
-
-            try:
-
-                cuenca_e, metodo_e, dist_e = buscar_cuenca_estacion(
-                    e,
-                    capas_subcuencas
-                )
-
-            except Exception as exc:
-
-                cuenca_e, metodo_e, dist_e = None, f"Error: {exc}", None
-
-            dist_km = (
-                round(dist_e * 111, 1)
-                if dist_e is not None
-                else None
-            )
-
-            revisar = (
-                cuenca_e is None
-                or metodo_e != "Por código de estación"
-                or (dist_km is not None and dist_km > TOL_AVISO_KM)
-            )
-
-            filas.append(
-                {
-                    "Revisar": "⚠️" if revisar else "✔",
-                    "Código estación": e["codigo"],
-                    "Nombre": e["nombre"],
-                    "País": e["pais"],
-                    "Subcuenca asignada": (
-                        nombre_corto(cuenca_e[0])
-                        if cuenca_e is not None
-                        else "—"
-                    ),
-                    "Método": metodo_e,
-                    "Dist. al borde (km)": dist_km,
-                }
-            )
-
-        st.dataframe(
-            pd.DataFrame(filas),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        with st.expander("Archivos de subcuencas detectados"):
-
-            st.write(
-                ", ".join(
-                    nombre_corto(n) for n, _ in capas_subcuencas
-                )
-                or "Ninguno"
-            )
-
-
-# ============================================================
-# 14. DIAGNÓSTICO
-# ============================================================
-
-if errores:
-
-    with st.expander(f"Errores de lectura ({len(errores)})"):
-
-        for error in errores:
-            st.write(error)
-
-st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
