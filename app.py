@@ -858,151 +858,179 @@ def extension_general(capas):
 # ============================================================
 
 @st.cache_data(show_spinner=False, max_entries=1)
-def mapa_estatico(clave, _paises, _capas_sub, _capas_rios):
-    """Mapa general: límites nacionales, subcuencas y red hidrográfica."""
-    fig, ax = plt.subplots(figsize=(9, 9))
-    ax.set_facecolor("#EAF2F8")
+def mapa_estatico(clave, _paises, _capas_sub, _capas_rios, _estaciones):
+    """Mapa ejecutivo: cuencas coloreadas de Ecuador/Perú y todas las estaciones."""
+    fig, ax = plt.subplots(figsize=(12, 10), facecolor="#F7FAFC")
+    ax.set_facecolor("#F2F6F8")
 
-    # Área habilitada para cuencas y ríos: únicamente Ecuador y Perú.
-    # Bolivia conserva su límite nacional y sus estaciones, pero no muestra
-    # todavía subcuencas ni red hidrográfica en el mapa general.
+    # Unir únicamente Ecuador y Perú: Bolivia conserva sus límites y puntos,
+    # pero no se dibujan allí cuencas ni ríos en esta etapa.
     area_habilitada = None
-
     if _paises is not None and not _paises.empty:
         paises_habilitados = _paises[
             _paises["pais"].isin(["Ecuador", "Perú"])
         ]
-
         if not paises_habilitados.empty:
             try:
                 area_habilitada = paises_habilitados.geometry.union_all()
             except Exception:
                 area_habilitada = paises_habilitados.geometry.unary_union
 
-    # Subcuencas: solo geometrías dentro de Ecuador y Perú.
-    # No se dibujan las subcuencas de Bolivia.
+    # Cada polígono de cuenca recibe un color pastel distinto y consistente.
+    indice_color = 0
     if area_habilitada is not None:
-        indice_color = 0
-
         for _, gdf in _capas_sub:
             if gdf is None or gdf.empty:
                 continue
-
             try:
                 capa = gdf
                 if capa.crs is None:
                     capa = capa.set_crs("EPSG:4326")
                 elif capa.crs.to_string() != "EPSG:4326":
                     capa = capa.to_crs("EPSG:4326")
-
                 geometrias = capa.geometry[
                     capa.geometry.notna() & ~capa.geometry.is_empty
                 ]
-
-                recortadas = geometrias.intersection(area_habilitada)
-                recortadas = recortadas[
-                    recortadas.notna() & ~recortadas.is_empty
-                ]
-
-                if not recortadas.empty:
-                    color = COLORES_CUENCAS[
-                        indice_color % len(COLORES_CUENCAS)
-                    ]
-                    gpd.GeoSeries(
-                        recortadas,
-                        crs="EPSG:4326"
-                    ).plot(
-                        ax=ax,
-                        facecolor="none",
-                        edgecolor=color,
-                        linewidth=0.45,
-                        alpha=0.9,
-                    )
-                    indice_color += 1
+                for geometria in geometrias:
+                    try:
+                        recortada = geometria.intersection(area_habilitada)
+                        if recortada is None or recortada.is_empty:
+                            continue
+                        # Tonalidades suaves para una cartografía limpia.
+                        tono = (indice_color * 0.61803398875) % 1.0
+                        r, g, b = colorsys.hsv_to_rgb(tono, 0.30, 0.98)
+                        color = (r, g, b)
+                        gpd.GeoSeries([recortada], crs="EPSG:4326").plot(
+                            ax=ax,
+                            facecolor=color,
+                            edgecolor="#536575",
+                            linewidth=0.42,
+                            alpha=0.78,
+                            zorder=2,
+                        )
+                        indice_color += 1
+                    except Exception:
+                        continue
             except Exception:
                 continue
 
-    # Red de ríos: solo los tramos ubicados en Ecuador y Perú.
-    # Bolivia se mostrará únicamente con sus límites y puntos de estación.
+    # Ríos solo en Ecuador y Perú.
     if area_habilitada is not None:
         for _, gdf in _capas_rios:
             if gdf is None or gdf.empty:
                 continue
-
             try:
                 capa = gdf
                 if capa.crs is None:
                     capa = capa.set_crs("EPSG:4326")
                 elif capa.crs.to_string() != "EPSG:4326":
                     capa = capa.to_crs("EPSG:4326")
-
                 geometrias = capa.geometry[
                     capa.geometry.notna() & ~capa.geometry.is_empty
                 ]
-
                 recortadas = geometrias.intersection(area_habilitada)
                 recortadas = recortadas[
                     recortadas.notna() & ~recortadas.is_empty
                 ]
-
                 if not recortadas.empty:
-                    gpd.GeoSeries(
-                        recortadas,
-                        crs="EPSG:4326"
-                    ).plot(
-                        ax=ax,
-                        color="#168AAD",
-                        linewidth=0.35,
-                        alpha=0.85,
+                    gpd.GeoSeries(recortadas, crs="EPSG:4326").plot(
+                        ax=ax, color="#168AAD", linewidth=0.38,
+                        alpha=0.78, zorder=3,
                     )
             except Exception:
                 continue
 
-    # Límites de países, cada uno con un color distinto.
+    # Contornos nacionales por encima de las cuencas.
     if _paises is not None and not _paises.empty:
         for _, fila in _paises.iterrows():
             try:
-                color_pais = COLORES_PAIS.get(fila["pais"], "#333333")
+                color_pais = COLORES_PAIS.get(fila["pais"], "#34495E")
                 gpd.GeoSeries([fila.geometry], crs="EPSG:4326").plot(
                     ax=ax, facecolor="none", edgecolor=color_pais,
-                    linewidth=1.8, zorder=5
+                    linewidth=1.65, zorder=5,
                 )
                 punto = fila.geometry.representative_point()
                 ax.annotate(
                     fila["pais"].upper(), (punto.x, punto.y),
-                    ha="center", va="center", fontsize=10,
-                    fontweight="bold", color=color_pais, zorder=6
+                    ha="center", va="center", fontsize=9,
+                    fontweight="bold", color="#243746", zorder=7,
+                    bbox={"boxstyle": "round,pad=0.25", "fc": "white",
+                          "ec": "none", "alpha": 0.78},
                 )
             except Exception:
                 pass
 
         xmin, ymin, xmax, ymax = _paises.total_bounds
-        mx = max((xmax - xmin) * 0.04, 0.35)
-        my = max((ymax - ymin) * 0.04, 0.35)
+        mx = max((xmax - xmin) * 0.035, 0.25)
+        my = max((ymax - ymin) * 0.035, 0.25)
         ax.set_xlim(xmin - mx, xmax + mx)
         ax.set_ylim(ymin - my, ymax + my)
 
-    ax.set_aspect("equal")
-    ax.grid(True, color="#B9C7D3", linewidth=0.3, linestyle="--", alpha=0.6)
-    ax.tick_params(labelsize=7)
-    ax.set_xlabel("Longitud", fontsize=8)
-    ax.set_ylabel("Latitud", fontsize=8)
+    # Todas las estaciones: colores por país, borde blanco y buena visibilidad.
+    if _estaciones:
+        for pais in PAISES_LISTA:
+            grupo = [e for e in _estaciones if e["pais"] == pais]
+            if not grupo:
+                continue
+            ax.scatter(
+                [e["lon"] for e in grupo], [e["lat"] for e in grupo],
+                s=27, c=COLORES_PAIS[pais], edgecolors="white",
+                linewidths=0.85, alpha=0.98, zorder=8, label=f"Estaciones {pais}",
+            )
+        sin_pais = [e for e in _estaciones if e["pais"] == SIN_PAIS]
+        if sin_pais:
+            ax.scatter(
+                [e["lon"] for e in sin_pais], [e["lat"] for e in sin_pais],
+                s=25, c="#424949", edgecolors="white", linewidths=0.8,
+                zorder=8, label="Estaciones sin país asignado",
+            )
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, color="#CBD5DC", linewidth=0.45, linestyle=":", alpha=0.75)
+    ax.tick_params(labelsize=8, colors="#52616B")
+    ax.set_xlabel("Longitud", fontsize=9, color="#34495E", labelpad=8)
+    ax.set_ylabel("Latitud", fontsize=9, color="#34495E", labelpad=8)
     ax.set_title(
-        "Cuencas y red hidrográfica | Ecuador · Perú · Bolivia",
-        fontsize=11, fontweight="bold"
+        "MAPA GENERAL DE CUENCAS Y ESTACIONES HIDROLÓGICAS\n"
+        "Ecuador · Perú · Bolivia | Cuencas coloreadas: Ecuador y Perú",
+        fontsize=13, fontweight="bold", color="#18324A", pad=16,
     )
 
     leyenda = [
+        Patch(facecolor="#DCEAF3", edgecolor="#536575", label="Cuencas (color individual)"),
+        Line2D([0], [0], color="#168AAD", linewidth=1.5, label="Red hidrográfica"),
         Patch(facecolor="none", edgecolor=COLORES_PAIS["Ecuador"], linewidth=1.8, label="Límite Ecuador"),
         Patch(facecolor="none", edgecolor=COLORES_PAIS["Perú"], linewidth=1.8, label="Límite Perú"),
         Patch(facecolor="none", edgecolor=COLORES_PAIS["Bolivia"], linewidth=1.8, label="Límite Bolivia"),
-        Line2D([0], [0], color="#168AAD", linewidth=1.2, label="Ríos"),
-        Patch(facecolor="none", edgecolor="#7D3C98", linewidth=1.0, label="Límites de subcuencas"),
     ]
-    ax.legend(handles=leyenda, loc="lower left", fontsize=7, framealpha=0.92)
+    # Añadir categorías de estaciones a la leyenda.
+    for pais in PAISES_LISTA:
+        leyenda.append(Line2D(
+            [0], [0], marker="o", linestyle="none", markersize=6,
+            markerfacecolor=COLORES_PAIS[pais], markeredgecolor="white",
+            label=f"Estaciones {pais}",
+        ))
+    if any(e["pais"] == SIN_PAIS for e in (_estaciones or [])):
+        leyenda.append(Line2D(
+            [0], [0], marker="o", linestyle="none", markersize=6,
+            markerfacecolor="#424949", markeredgecolor="white",
+            label="Estaciones sin país asignado",
+        ))
+    ax.legend(
+        handles=leyenda, loc="lower left", fontsize=7.5,
+        frameon=True, framealpha=0.96, facecolor="white",
+        edgecolor="#D5DEE5", ncol=2,
+    )
 
+    for spine in ax.spines.values():
+        spine.set_color("#B8C7D1")
+        spine.set_linewidth(0.8)
+    fig.tight_layout(pad=1.4)
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=110, bbox_inches="tight")
+    fig.savefig(
+        buffer, format="png", dpi=160, bbox_inches="tight",
+        facecolor=fig.get_facecolor(),
+    )
     plt.close(fig)
     return buffer.getvalue()
 
@@ -1088,6 +1116,7 @@ with st.spinner("Generando mapa general..."):
         paises_gdf,
         capas_subcuencas_mapa,
         capas_rios_mapa,
+        estaciones,
     )
 
 st.image(imagen, use_container_width=True)
