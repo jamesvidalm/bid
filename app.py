@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from pathlib import Path
 from io import BytesIO
 import colorsys
@@ -50,14 +51,16 @@ CARPETAS = {
 PAISES_MAP = {
     "ECUADOR": "Ecuador",
     "PERU": "Perú",
+    "BOLIVIA": "Bolivia",
 }
 
-PAISES_LISTA = ["Ecuador", "Perú"]
+PAISES_LISTA = ["Ecuador", "Perú", "Bolivia"]
 SIN_PAIS = "Sin país asignado"
 
 COLORES_PAIS = {
     "Ecuador": "#555555",
     "Perú": "#555555",
+    "Bolivia": "#555555",
 }
 
 COLOR_CUENCA_ACTIVA = "#FFC400"
@@ -378,7 +381,35 @@ def construir_paises(clave, _capas_sud):
     except Exception:
         pass
 
-    return todo.dissolve(by="pais", as_index=False)
+    todo = todo.dissolve(by="pais", as_index=False)
+
+    # Conservar únicamente el componente continental principal de cada país.
+    # Esto excluye Galápagos y otros polígonos insulares separados del continente.
+    geometria_principal = []
+
+    for geom in todo.geometry:
+        if geom is None or geom.is_empty:
+            geometria_principal.append(geom)
+            continue
+
+        if geom.geom_type == "Polygon":
+            geometria_principal.append(geom)
+            continue
+
+        partes = [
+            parte for parte in getattr(geom, "geoms", [])
+            if parte.geom_type == "Polygon" and not parte.is_empty
+        ]
+
+        if partes:
+            geometria_principal.append(max(partes, key=lambda parte: parte.area))
+        else:
+            geometria_principal.append(geom)
+
+    todo = todo.copy()
+    todo.geometry = geometria_principal
+
+    return todo
 
 
 def asignar_pais(geom, paises_gdf):
@@ -792,17 +823,7 @@ def mapa_estatico(
 
     ax.set_facecolor("#D6E6F2")
 
-    for _, gdf in _capas_sud:
-        try:
-            gdf.plot(
-                ax=ax,
-                facecolor="none",
-                edgecolor="#A7A79F",
-                linewidth=0.4,
-            )
-        except Exception:
-            pass
-
+    # Dibujar únicamente Ecuador, Perú y Bolivia (sin islas).
     if _paises is not None and not _paises.empty:
 
         for _, fila in _paises.iterrows():
@@ -907,7 +928,7 @@ def mapa_estatico(
     ax.set_ylabel("Latitud", fontsize=8)
 
     ax.set_title(
-        "Cuencas Andino-Amazónicas de Ecuador y Perú",
+        "Cuencas Andino-Amazónicas de Ecuador, Perú y Bolivia",
         fontsize=12,
         fontweight="bold",
     )
@@ -915,6 +936,7 @@ def mapa_estatico(
     leyenda = [
         Patch(facecolor="none", edgecolor="#555", linewidth=1.2, label="Ecuador"),
         Patch(facecolor="none", edgecolor="#555", linewidth=1.2, label="Perú"),
+        Patch(facecolor="none", edgecolor="#555", linewidth=1.2, label="Bolivia"),
         Line2D([0], [0], color="#2E86C1", linewidth=1.2, label="Ríos"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#D9534F",
                markeredgecolor="white", markersize=7, label="Estaciones"),
@@ -997,11 +1019,12 @@ conteo[SIN_PAIS] = 0
 for e in estaciones:
     conteo[e["pais"]] = conteo.get(e["pais"], 0) + 1
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 
 m1.metric("Estaciones totales", len(estaciones))
 m2.metric("Ecuador", conteo["Ecuador"])
 m3.metric("Perú", conteo["Perú"])
+m4.metric("Bolivia", conteo["Bolivia"])
 
 if paises_gdf.empty:
     st.warning(
@@ -1360,11 +1383,6 @@ if estacion_sel is not None:
                     "mismo nombre y sufijo _RIO)."
                 )
 
-            with st.expander("Detalle del proceso", expanded=True):
-
-                for p in pasos:
-                    st.write(p)
-
     except Exception as exc:
 
         st.error("Ocurrió un error al cargar la cuenca de esta estación:")
@@ -1382,4 +1400,4 @@ if errores:
         for error in errores:
             st.write(error)
 
-st.caption("Visor Hidrológico BID | Ecuador · Perú")
+st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
