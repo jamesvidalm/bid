@@ -1,7 +1,8 @@
-streamlit
-geopandas
-pyogrio
-folium
-shapely
-matplotlib
-pyarrow<25
+streamlit>=1.40
+geopandas>=1.0
+pyogrio>=0.9
+pandas>=2.2
+folium>=0.15
+matplotlib>=3.8
+shapely>=2.0
+pyproj>=3.6
