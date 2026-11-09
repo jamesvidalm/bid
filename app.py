@@ -1,775 +1,1396 @@
-
 # -*- coding: utf-8 -*-
 
-import os
-import json
-import hashlib
-import warnings
 from pathlib import Path
+from io import BytesIO
+import colorsys
+import hashlib
+import re
+import unicodedata
+import warnings
 
 import streamlit as st
+import streamlit.components.v1 as components
+import pandas as pd
 import geopandas as gpd
 import pyogrio
 import folium
+import matplotlib
 
-from folium.plugins import Fullscreen, MousePosition, MiniMap
-from streamlit_folium import st_folium
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+from shapely.geometry import Point
+from folium.plugins import Fullscreen
 
 warnings.filterwarnings("ignore")
 
 # ============================================================
-# 1. CONFIGURACION
+# 1. CONFIGURACIÓN
 # ============================================================
 
 st.set_page_config(
-    page_title="Modelamiento Hidrológico Andino-Amazónico",
+    page_title="Visor Hidrológico BID",
     page_icon="🌎",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed",
 )
 
 ROOT = Path(__file__).resolve().parent
 
-DIR_PUNTOS = ROOT / "puntos"
-DIR_SUDAMERICA = ROOT / "sudamerica"
-DIR_SUBCUENCAS = ROOT / "subcuencas"
+CARPETAS = {
+    "puntos": ROOT / "puntos",
+    "rios": ROOT / "rios",
+    "subcuencas": ROOT / "subcuencas",
+    "sudamerica": ROOT / "sudamerica",
+}
 
-TITULO = (
-    "Modelamiento Hidrológico de las Cuencas "
-    "Andino-Amazónicas de Ecuador, Perú y Bolivia"
-)
+PAISES_MAP = {
+    "ECUADOR": "Ecuador",
+    "PERU": "Perú",
+    "BOLIVIA": "Bolivia",
+}
 
-PALETA = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231",
-    "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
-    "#fabebe", "#008080", "#e6beff", "#9a6324",
-    "#800000", "#aaffc3", "#808000", "#ffd8b1",
-    "#000075", "#808080", "#1b9e77", "#d95f02",
-    "#7570b3", "#e7298a", "#66a61e", "#e6ab02",
-    "#a6761d", "#666666", "#17becf", "#bcbd22",
-    "#8c564b", "#ff9896"
+PAISES_LISTA = ["Ecuador", "Perú", "Bolivia"]
+SIN_PAIS = "Sin país asignado"
+
+COLORES_PAIS = {
+    "Ecuador": "#F7E3A1",
+    "Perú": "#F4B9AC",
+    "Bolivia": "#BFDDA6",
+}
+
+COLOR_CUENCA_ACTIVA = "#FFC400"
+COLOR_BORDE_ACTIVO = "#FFFFFF"
+COLOR_RIO_ACTIVO = "#00BFFF"
+COLOR_ESTACION_ACTIVA = "#FFD000"
+
+CANDIDATOS_NOMBRE = [
+    "ESTACION", "NOMBRE", "NAME", "NOMBREESTACION", "NOMESTACION",
+    "NOMEST", "NOM", "STATION", "ESTNOMBRE",
 ]
 
+CANDIDATOS_CODIGO = [
+    "CODIGO", "COD", "CODE", "CODESTACION", "CODIGOESTACION",
+    "CODEST", "IDESTACION", "ID", "IDE", "CODIGOEST",
+]
+
+CRS_AREA = "EPSG:6933"
+
+# Distancia (grados) estación-borde para considerar que la estación
+# está en la salida de la cuenca (~3 km).
+TOL_SALIDA = 0.03
+
+# Distancia (grados) para considerar válida una cuenca cercana (~2 km).
+TOL_CERCANA = 0.02
+
+# Si la estación está a más de ~5 km del borde, se avisa.
+TOL_AVISO_KM = 5.0
+
 
 # ============================================================
-# 2. FUNCIONES AUXILIARES
+# 2. UTILIDADES
 # ============================================================
 
-def color_estable(nombre):
-    numero = int(
-        hashlib.md5(nombre.encode("utf-8")).hexdigest()[:8],
-        16
+def normalizar(texto):
+
+    t = unicodedata.normalize("NFKD", str(texto))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+
+    return t.upper().strip()
+
+
+def normalizar_columna(texto):
+
+    return re.sub(r"[^A-Z0-9]", "", normalizar(texto))
+
+
+def pais_desde_texto(valor):
+
+    n = normalizar(valor)
+
+    for clave, nombre in PAISES_MAP.items():
+        if clave in n:
+            return nombre
+
+    return None
+
+
+def buscar_columna(gdf, candidatos):
+
+    geom_col = gdf.geometry.name
+
+    mapa = {
+        normalizar_columna(c): c
+        for c in gdf.columns
+        if c != geom_col
+    }
+
+    for cand in candidatos:
+        if cand in mapa:
+            return mapa[cand]
+
+    return None
+
+
+def limpiar_valor(valor):
+
+    texto = str(valor).strip()
+
+    if texto == "" or texto.lower() in ("none", "nan", "nat", "<na>"):
+        return "S/D"
+
+    return texto
+
+
+def color_por_indice(i, desplazamiento=0):
+    """Color distinto por polígono (espaciado por proporción áurea)."""
+
+    hue = ((i + desplazamiento) * 0.61803398875) % 1.0
+    sat = 0.50 + 0.18 * ((i * 7) % 3) / 2
+    val = 0.88 - 0.10 * ((i * 5) % 3) / 2
+
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+
+    return "#{:02X}{:02X}{:02X}".format(
+        int(r * 255), int(g * 255), int(b * 255)
     )
-    return PALETA[numero % len(PALETA)]
 
 
-def buscar_archivos(carpeta, extension):
+def firma(capas):
+
+    return "|".join(f"{n}:{len(g)}" for n, g in capas)
+
+
+# ============================================================
+# 3. LECTURA DE ARCHIVOS
+# ============================================================
+
+def buscar_archivos(carpeta):
+
     if not carpeta.exists():
         return []
 
     return sorted(
-        carpeta.rglob(f"*{extension}"),
-        key=lambda x: str(x).lower()
+        [
+            p for p in carpeta.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in (".shp", ".gpkg")
+        ],
+        key=lambda p: str(p).lower()
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=80)
-def leer_shapefile(ruta, modificacion):
-    return gpd.read_file(ruta, engine="pyogrio")
+@st.cache_resource(show_spinner=False, max_entries=60)
+def leer_archivo(ruta, capa, modificacion):
+
+    if capa is None:
+        return gpd.read_file(ruta, engine="pyogrio")
+
+    return gpd.read_file(ruta, layer=capa, engine="pyogrio")
 
 
-@st.cache_data(show_spinner=False, max_entries=150)
-def leer_gpkg_capa(ruta, nombre_capa, modificacion):
-    return gpd.read_file(
-        ruta,
-        layer=nombre_capa,
-        engine="pyogrio"
-    )
+@st.cache_resource(show_spinner=False, max_entries=60)
+def preparar_archivo(ruta, capa, modificacion, tipo):
 
-
-def preparar_gdf(gdf):
-
-    if gdf is None or gdf.empty:
-        raise ValueError("La capa no contiene registros.")
-
-    if gdf.crs is None:
-        raise ValueError("El archivo no tiene sistema de coordenadas.")
-
-    gdf = gdf[gdf.geometry.notna()].copy()
-    gdf = gdf[~gdf.geometry.is_empty].copy()
+    gdf = leer_archivo(ruta, capa, modificacion)
 
     if gdf.empty:
-        raise ValueError("No existen geometrías válidas.")
+        return None
+
+    if gdf.crs is None:
+        raise ValueError("El archivo no tiene CRS.")
+
+    gdf = gdf[gdf.geometry.notna()]
+    gdf = gdf[~gdf.geometry.is_empty]
+
+    if gdf.empty:
+        return None
 
     if gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(epsg=4326)
 
-    try:
-        gdf.geometry = gdf.geometry.simplify(
-            tolerance=0.0003,
-            preserve_topology=True
-        )
-    except Exception:
-        pass
+    tolerancias = {
+        "puntos": 0,
+        "rios": 0.0002,
+        "subcuencas": 0.0004,
+        "sudamerica": 0.001,
+    }
+
+    tolerancia = tolerancias.get(tipo, 0)
+
+    gdf = gdf.copy()
+
+    if tolerancia > 0:
+        try:
+            gdf.geometry = gdf.geometry.simplify(
+                tolerance=tolerancia,
+                preserve_topology=True
+            )
+        except Exception:
+            pass
+
+    geom_col = gdf.geometry.name
+
+    # Puntos y Sudamérica conservan atributos (código, nombre, país).
+    # Ríos y subcuencas solo geometría.
+    if tipo in ("puntos", "sudamerica"):
+        gdf = gdf.copy()
+    else:
+        gdf = gdf[[geom_col]].copy()
 
     return gdf.reset_index(drop=True)
 
 
-def campos_visibles(gdf, limite=5):
+def cargar_carpeta(tipo):
 
-    campos = []
+    carpeta = CARPETAS[tipo]
 
-    for campo in gdf.columns:
+    capas = []
+    errores = []
 
-        if campo == gdf.geometry.name:
+    for archivo in buscar_archivos(carpeta):
+
+        try:
+
+            nombre_base = (
+                archivo.relative_to(carpeta)
+                .with_suffix("")
+                .as_posix()
+            )
+
+            if archivo.suffix.lower() == ".gpkg":
+
+                listado = pyogrio.list_layers(str(archivo))
+
+                capas_internas = [
+                    str(fila[0])
+                    for fila in listado
+                    if fila[0] is not None
+                    and str(fila[1]).lower() != "none"
+                ]
+
+            else:
+                capas_internas = [None]
+
+            for capa in capas_internas:
+
+                try:
+
+                    gdf = preparar_archivo(
+                        str(archivo),
+                        capa,
+                        archivo.stat().st_mtime,
+                        tipo
+                    )
+
+                    if gdf is None:
+                        continue
+
+                    nombre = nombre_base
+
+                    if capa is not None and len(capas_internas) > 1:
+                        nombre = f"{nombre_base} - {capa}"
+
+                    capas.append((nombre, gdf))
+
+                except Exception as e:
+                    errores.append(f"{archivo.name} / {capa}: {e}")
+
+        except Exception as e:
+            errores.append(f"{archivo.name}: {e}")
+
+    return capas, errores
+
+
+# ============================================================
+# 4. PAÍSES Y ESTACIONES
+# ============================================================
+
+def detectar_columna_pais(gdf):
+
+    geom_col = gdf.geometry.name
+
+    for c in gdf.columns:
+
+        if c == geom_col:
+            continue
+
+        if pd.api.types.is_numeric_dtype(gdf[c]):
             continue
 
         try:
-            if gdf[campo].notna().any():
-                campos.append(campo)
+            valores = gdf[c].dropna().astype(str).unique()[:3000]
         except Exception:
             continue
 
-        if len(campos) >= limite:
-            break
+        if any(pais_desde_texto(v) for v in valores):
+            return c
 
-    return campos
+    return None
 
 
-def opciones_popup(gdf):
+@st.cache_resource(show_spinner=False, max_entries=4)
+def construir_paises(clave, _capas_sud):
+    """Une los polígonos de Ecuador, Perú y Bolivia (uno por país)."""
 
-    campos = campos_visibles(gdf)
+    partes = []
 
-    if not campos:
-        return None, None
+    for _, gdf in _capas_sud:
 
-    tooltip = folium.GeoJsonTooltip(
-        fields=campos[:4],
-        aliases=[f"{c}:" for c in campos[:4]],
-        sticky=True,
-        localize=True
+        col = detectar_columna_pais(gdf)
+
+        if col is None:
+            continue
+
+        paises = gdf[col].map(pais_desde_texto)
+
+        g = gpd.GeoDataFrame(
+            {
+                "pais": paises.values,
+                "geometry": gdf.geometry.values,
+            },
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+        g = g[g["pais"].notna()]
+
+        if not g.empty:
+            partes.append(g)
+
+    if not partes:
+        return gpd.GeoDataFrame(
+            {"pais": [], "geometry": []},
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+    todo = gpd.GeoDataFrame(
+        pd.concat(partes, ignore_index=True),
+        geometry="geometry",
+        crs="EPSG:4326",
     )
 
-    popup = folium.GeoJsonPopup(
-        fields=campos,
-        aliases=[f"{c}:" for c in campos],
-        localize=True,
-        max_width=350
-    )
+    try:
+        todo["geometry"] = todo.geometry.buffer(0)
+    except Exception:
+        pass
 
-    return tooltip, popup
+    return todo.dissolve(by="pais", as_index=False)
 
 
-def convertir_geojson(gdf):
-    # CORRECCION: json está importado al inicio del archivo.
-    geojson = gdf.to_json(drop_id=True, na="null")
-    return json.loads(geojson)
+def asignar_pais(geom, paises_gdf):
+
+    if paises_gdf is None or paises_gdf.empty:
+        return SIN_PAIS
+
+    for _, fila in paises_gdf.iterrows():
+        if fila.geometry.covers(geom):
+            return fila["pais"]
+
+    distancias = paises_gdf.geometry.distance(geom)
+    idx = distancias.idxmin()
+
+    # ~11 km de tolerancia para estaciones en el borde.
+    if float(distancias.loc[idx]) <= 0.1:
+        return paises_gdf.loc[idx, "pais"]
+
+    return SIN_PAIS
 
 
-def agregar_poligono(mapa, gdf, nombre, color):
+@st.cache_resource(show_spinner=False, max_entries=4)
+def construir_estaciones(clave, _capas_puntos, _paises):
+    """Lista de estaciones con país, código y nombre."""
 
-    tooltip, popup = opciones_popup(gdf)
+    estaciones = []
 
-    folium.GeoJson(
-        data=convertir_geojson(gdf),
-        name=nombre,
+    for nombre_capa, gdf in _capas_puntos:
 
-        style_function=lambda feature, color=color: {
-            "color": color,
-            "weight": 1.2,
-            "fillColor": color,
-            "fillOpacity": 0.25,
-            "opacity": 0.95
-        },
+        col_nombre = buscar_columna(gdf, CANDIDATOS_NOMBRE)
+        col_codigo = buscar_columna(gdf, CANDIDATOS_CODIGO)
 
-        highlight_function=lambda feature: {
-            "color": "#ffffff",
-            "weight": 2.5,
-            "fillOpacity": 0.45
-        },
+        otras = [
+            c for c in gdf.columns
+            if c != gdf.geometry.name
+            and c != col_codigo
+        ]
 
-        tooltip=tooltip,
-        popup=popup,
-        show=True
+        if col_nombre is None and otras:
+            col_nombre = otras[0]
 
-    ).add_to(mapa)
+        for i in range(len(gdf)):
+
+            geom = gdf.geometry.iloc[i]
+
+            if geom.geom_type != "Point":
+                continue
+
+            nombre = (
+                limpiar_valor(gdf[col_nombre].iloc[i])
+                if col_nombre is not None
+                else f"Estación {i + 1}"
+            )
+
+            codigo = (
+                limpiar_valor(gdf[col_codigo].iloc[i])
+                if col_codigo is not None
+                else "S/D"
+            )
+
+            estaciones.append(
+                {
+                    "clave": f"{nombre_capa}#{i}",
+                    "capa": nombre_capa,
+                    "nombre": nombre,
+                    "codigo": codigo,
+                    "pais": asignar_pais(geom, _paises),
+                    "lat": float(geom.y),
+                    "lon": float(geom.x),
+                }
+            )
+
+    return estaciones
 
 
-def agregar_puntos(mapa, gdf, nombre):
+# ============================================================
+# 5. ASOCIAR ESTACIÓN -> SUBCUENCA
+# ============================================================
 
-    tooltip, popup = opciones_popup(gdf)
+def nombre_corto(nombre_capa):
+    """'carpeta/BID_033 - capa' -> 'BID_033'."""
 
-    folium.GeoJson(
-        data=convertir_geojson(gdf),
-        name=nombre,
-
-        marker=folium.CircleMarker(
-            radius=5,
-            color="#ffffff",
-            weight=1,
-            fill=True,
-            fill_color="#e31a1c",
-            fill_opacity=0.95
-        ),
-
-        tooltip=tooltip,
-        popup=popup,
-        show=True
-
-    ).add_to(mapa)
+    return nombre_capa.split("/")[-1].split(" - ")[0]
 
 
-def calcular_extension(lista_gdf):
+def clave_codigo(texto):
 
-    if not lista_gdf:
-        return [-4.0, -75.0], None
+    return re.sub(r"[^A-Z0-9]", "", normalizar(texto))
+
+
+def coincide_codigo(codigo, nombre_capa):
+    """True si el código de la estación corresponde al nombre
+    del archivo/capa de la subcuenca (BID_033 <-> BID_033)."""
+
+    c = clave_codigo(codigo)
+
+    if not c or c == "SD":
+        return False
+
+    s = clave_codigo(nombre_corto(nombre_capa))
+
+    if c == s:
+        return True
+
+    # Código completo dentro del nombre, sin pegarse a otros dígitos
+    # (evita que BID_03 coincida con BID_033).
+    completo = clave_codigo(nombre_capa)
+
+    if re.search(rf"(?<![0-9]){re.escape(c)}(?![0-9])", completo):
+        return True
+
+    # Mismo prefijo y mismo número (BID_33 <-> BID_033).
+    pc = re.match(r"^([A-Z]*)(\d+)$", c)
+    ps = re.match(r"^([A-Z]*)(\d+)$", s)
+
+    if pc and ps and pc.group(1) == ps.group(1):
+        return int(pc.group(2)) == int(ps.group(2))
+
+    return False
+
+
+def distancia_borde(geom, punto):
+
+    try:
+        return float(geom.boundary.distance(punto))
+    except Exception:
+        return float("inf")
+
+
+def elegir_en_capa(gdf, punto):
+    """Dentro de una capa, elige el polígono cuya salida está
+    más cerca de la estación."""
+
+    if len(gdf) == 1:
+        idx = gdf.index[0]
+        return int(idx), distancia_borde(gdf.geometry.loc[idx], punto)
+
+    mejor = None
+    mejor_d = float("inf")
+
+    for idx in gdf.index:
+
+        d = distancia_borde(gdf.geometry.loc[idx], punto)
+
+        if d < mejor_d:
+            mejor_d = d
+            mejor = int(idx)
+
+    return mejor, mejor_d
+
+
+def buscar_cuenca_estacion(est, capas_subcuencas):
+    """Devuelve ((nombre_capa, indice), metodo, dist_borde_grados)."""
+
+    punto = Point(est["lon"], est["lat"])
+
+    # ---- 1. Por código de estación (método exacto) ----
+    coincidencias = [
+        (nombre, gdf)
+        for nombre, gdf in capas_subcuencas
+        if coincide_codigo(est["codigo"], nombre)
+    ]
+
+    if coincidencias:
+
+        # Si hubiera más de una, elegir la de salida más cercana.
+        mejor = None
+
+        for nombre, gdf in coincidencias:
+
+            idx, d = elegir_en_capa(gdf, punto)
+
+            if mejor is None or d < mejor[2]:
+                mejor = (nombre, idx, d)
+
+        return (
+            (mejor[0], mejor[1]),
+            "Por código de estación",
+            mejor[2],
+        )
+
+    # ---- 2. Estación en la salida (borde) de la cuenca ----
+    mejor = None
+
+    for nombre, gdf in capas_subcuencas:
+
+        try:
+
+            posiciones = gdf.sindex.query(
+                punto.buffer(TOL_SALIDA)
+            )
+
+            for pos in posiciones:
+
+                geom = gdf.geometry.iloc[pos]
+                d = distancia_borde(geom, punto)
+
+                if d <= TOL_SALIDA and (
+                    mejor is None or d < mejor[2]
+                ):
+                    mejor = (nombre, int(gdf.index[pos]), d)
+
+        except Exception:
+            continue
+
+    if mejor is not None:
+        return (
+            (mejor[0], mejor[1]),
+            "Estación en la salida de la cuenca",
+            mejor[2],
+        )
+
+    # ---- 3. Polígono más pequeño que contiene la estación ----
+    candidatas = []
+
+    for nombre, gdf in capas_subcuencas:
+
+        try:
+
+            mascara = gdf.geometry.covers(punto)
+
+            for idx in gdf.index[mascara]:
+
+                geom = gdf.geometry.loc[idx]
+
+                candidatas.append(
+                    (geom.area, nombre, int(idx), distancia_borde(geom, punto))
+                )
+
+        except Exception:
+            continue
+
+    if candidatas:
+
+        candidatas.sort(key=lambda x: x[0])
+
+        return (
+            (candidatas[0][1], candidatas[0][2]),
+            "Polígono más pequeño que contiene la estación",
+            candidatas[0][3],
+        )
+
+    # ---- 4. Cuenca más cercana ----
+    mejor = None
+
+    for nombre, gdf in capas_subcuencas:
+
+        try:
+
+            distancias = gdf.geometry.distance(punto)
+
+            idx = distancias.idxmin()
+            d = float(distancias.loc[idx])
+
+            if mejor is None or d < mejor[2]:
+                mejor = (nombre, int(idx), d)
+
+        except Exception:
+            continue
+
+    if mejor is not None and mejor[2] <= TOL_CERCANA:
+        return (
+            (mejor[0], mejor[1]),
+            "Cuenca más cercana",
+            mejor[2],
+        )
+
+    return None, "Sin cuenca asociada", None
+
+
+def obtener_poligono(seleccion, capas_subcuencas):
+
+    if seleccion is None:
+        return None
+
+    nombre_buscado, indice_buscado = seleccion
+
+    for nombre, gdf in capas_subcuencas:
+
+        if nombre == nombre_buscado:
+
+            if indice_buscado in gdf.index:
+                return gdf.geometry.loc[indice_buscado]
+
+    return None
+
+
+def calcular_area_km2(poligono):
+
+    try:
+        serie = gpd.GeoSeries([poligono], crs="EPSG:4326")
+        return float(serie.to_crs(CRS_AREA).area.iloc[0]) / 1_000_000
+    except Exception:
+        return None
+
+
+def rios_de_cuenca(poligono, capas_rios):
+    """Tramos de río dentro de la cuenca, como lista de GeoJSON."""
+
+    resultado = []
+
+    if poligono is None:
+        return resultado
+
+    for nombre, gdf in capas_rios:
+
+        try:
+
+            posiciones = gdf.sindex.query(
+                poligono,
+                predicate="intersects"
+            )
+
+            if len(posiciones) == 0:
+                continue
+
+            sel = gdf.iloc[posiciones].copy()
+
+            sel.geometry = sel.geometry.intersection(poligono)
+
+            sel = sel[~sel.geometry.is_empty]
+
+            if sel.empty:
+                continue
+
+            resultado.append(
+                sel[[sel.geometry.name]].to_json(drop_id=True)
+            )
+
+        except Exception:
+            continue
+
+    return resultado
+
+
+def extension_general(capas):
 
     limites = []
 
-    for gdf in lista_gdf:
+    for _, gdf in capas:
 
-        bounds = gdf.total_bounds
+        if not gdf.empty:
 
-        if len(bounds) == 4 and all(
-            map(lambda x: x == x, bounds)
-        ):
-            limites.append(bounds)
+            try:
+                limites.append(gdf.total_bounds)
+            except Exception:
+                pass
 
     if not limites:
-        return [-4.0, -75.0], None
+        return None
 
     xmin = min(b[0] for b in limites)
     ymin = min(b[1] for b in limites)
     xmax = max(b[2] for b in limites)
     ymax = max(b[3] for b in limites)
 
-    centro = [
-        (ymin + ymax) / 2,
-        (xmin + xmax) / 2
-    ]
-
-    extension = [
-        [ymin, xmin],
-        [ymax, xmax]
-    ]
-
-    return centro, extension
+    return xmin, ymin, xmax, ymax
 
 
 # ============================================================
-# 3. CARGAR SHAPEFILES
+# 6. MAPA GENERAL ESTÁTICO (IMAGEN)
 # ============================================================
 
-def cargar_shapefiles(archivos, etiqueta):
-
-    capas = []
-    errores = []
-
-    for archivo in archivos:
-
-        try:
-
-            gdf = leer_shapefile(
-                str(archivo),
-                archivo.stat().st_mtime
-            )
-
-            gdf = preparar_gdf(gdf)
-
-            capas.append((archivo.stem, gdf))
-
-        except Exception as error:
-
-            errores.append(
-                f"{etiqueta} / {archivo.name}: {error}"
-            )
-
-    return capas, errores
-
-
-# ============================================================
-# 4. CARGAR GEOPACKAGES
-# ============================================================
-
-def cargar_geopackages(archivos):
-
-    capas = []
-    errores = []
-
-    for archivo in archivos:
-
-        try:
-
-            listado = pyogrio.list_layers(str(archivo))
-
-            nombres_capas = [
-                str(fila[0])
-                for fila in listado
-                if fila[0] is not None
-            ]
-
-            if not nombres_capas:
-
-                errores.append(
-                    f"{archivo.name}: no contiene capas."
-                )
-                continue
-
-            for nombre_capa in nombres_capas:
-
-                try:
-
-                    gdf = leer_gpkg_capa(
-                        str(archivo),
-                        nombre_capa,
-                        archivo.stat().st_mtime
-                    )
-
-                    gdf = preparar_gdf(gdf)
-
-                    nombre_mapa = (
-                        f"{archivo.stem} - {nombre_capa}"
-                    )
-
-                    capas.append((nombre_mapa, gdf))
-
-                except Exception as error:
-
-                    errores.append(
-                        f"{archivo.name} / "
-                        f"{nombre_capa}: {error}"
-                    )
-
-        except Exception as error:
-
-            errores.append(
-                f"{archivo.name}: {error}"
-            )
-
-    return capas, errores
-
-
-# ============================================================
-# 5. ENCABEZADO
-# ============================================================
-
-st.markdown(
-    f"""
-    <div style="
-        background:linear-gradient(115deg,#082f49,#075985,#0f766e);
-        padding:26px 30px;
-        border-radius:13px;
-        color:white;
-        margin-bottom:18px;">
-
-        <div style="
-            font-size:12px;
-            letter-spacing:2px;
-            opacity:.85;">
-            PLATAFORMA DE MODELAMIENTO HIDROLÓGICO
-        </div>
-
-        <h1 style="
-            color:white;
-            font-size:29px;
-            margin:10px 0;">
-            {TITULO}
-        </h1>
-
-        <div style="font-size:14px;opacity:.9;">
-            Ecuador · Perú · Bolivia |
-            Cuencas, subcuencas y estaciones
-        </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
-# 6. DETECTAR ARCHIVOS
-# ============================================================
-
-archivos_puntos = buscar_archivos(
-    DIR_PUNTOS, ".shp"
-)
-
-archivos_sudamerica = buscar_archivos(
-    DIR_SUDAMERICA, ".shp"
-)
-
-archivos_gpkg = buscar_archivos(
-    DIR_SUBCUENCAS, ".gpkg"
-)
-
-
-# ============================================================
-# 7. PANEL LATERAL
-# ============================================================
-
-st.sidebar.title("🗺️ Panel de capas")
-
-ver_sudamerica = st.sidebar.checkbox(
-    "Sudamérica",
-    value=True
-)
-
-ver_puntos = st.sidebar.checkbox(
-    "Estaciones hidrológicas",
-    value=True
-)
-
-ver_cuencas = st.sidebar.checkbox(
-    "Cuencas y subcuencas",
-    value=True
-)
-
-ver_satelite = st.sidebar.checkbox(
-    "Google Satélite",
-    value=True
-)
-
-st.sidebar.divider()
-
-st.sidebar.markdown("**Archivos detectados en GitHub**")
-
-st.sidebar.write(
-    f"Shapefiles de Sudamérica: {len(archivos_sudamerica)}"
-)
-
-st.sidebar.write(
-    f"Shapefiles de puntos: {len(archivos_puntos)}"
-)
-
-st.sidebar.write(
-    f"GeoPackages: {len(archivos_gpkg)}"
-)
-
-if st.sidebar.button(
-    "🔄 Recargar archivos",
-    use_container_width=True
+@st.cache_data(show_spinner=False, max_entries=2)
+def mapa_estatico(
+    clave,
+    _capas_sud,
+    _capas_sub,
+    _capas_rios,
+    _estaciones,
+    _paises,
 ):
 
+    fig, ax = plt.subplots(figsize=(9, 10))
+
+    ax.set_facecolor("#D6E6F2")
+
+    for _, gdf in _capas_sud:
+        try:
+            gdf.plot(
+                ax=ax,
+                facecolor="#F1F0EA",
+                edgecolor="#A7A79F",
+                linewidth=0.4,
+            )
+        except Exception:
+            pass
+
+    if _paises is not None and not _paises.empty:
+
+        for _, fila in _paises.iterrows():
+
+            try:
+                gpd.GeoSeries(
+                    [fila.geometry],
+                    crs="EPSG:4326"
+                ).plot(
+                    ax=ax,
+                    facecolor=COLORES_PAIS.get(fila["pais"], "#DDDDDD"),
+                    edgecolor="#555555",
+                    linewidth=0.9,
+                )
+            except Exception:
+                pass
+
+    for nombre, gdf in _capas_sub:
+
+        try:
+
+            desplazamiento = int(
+                hashlib.md5(nombre.encode("utf-8")).hexdigest()[:4], 16
+            ) % 997
+
+            colores = [
+                color_por_indice(i, desplazamiento)
+                for i in range(len(gdf))
+            ]
+
+            gdf.plot(
+                ax=ax,
+                color=colores,
+                edgecolor="#555555",
+                linewidth=0.15,
+                alpha=0.60,
+            )
+
+        except Exception:
+            pass
+
+    for _, gdf in _capas_rios:
+        try:
+            gdf.plot(ax=ax, color="#2E86C1", linewidth=0.35)
+        except Exception:
+            pass
+
+    if _estaciones:
+        ax.scatter(
+            [e["lon"] for e in _estaciones],
+            [e["lat"] for e in _estaciones],
+            s=9,
+            c="#D9534F",
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=5,
+        )
+
+    if _paises is not None and not _paises.empty:
+
+        for _, fila in _paises.iterrows():
+
+            try:
+                p = fila.geometry.representative_point()
+
+                ax.annotate(
+                    fila["pais"].upper(),
+                    (p.x, p.y),
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    fontweight="bold",
+                    color="#2B2B2B",
+                    alpha=0.85,
+                    zorder=6,
+                )
+            except Exception:
+                pass
+
+    try:
+
+        if _paises is not None and not _paises.empty:
+            xmin, ymin, xmax, ymax = _paises.total_bounds
+        else:
+            xmin, ymin, xmax, ymax = extension_general(
+                list(_capas_sud) + list(_capas_sub)
+            )
+
+        margen = 1.5
+
+        ax.set_xlim(xmin - margen, xmax + margen)
+        ax.set_ylim(ymin - margen, ymax + margen)
+
+    except Exception:
+        pass
+
+    ax.set_aspect("equal")
+
+    ax.grid(True, color="#B9C7D3", linewidth=0.4, linestyle="--")
+    ax.tick_params(labelsize=7)
+    ax.set_xlabel("Longitud", fontsize=8)
+    ax.set_ylabel("Latitud", fontsize=8)
+
+    ax.set_title(
+        "Cuencas Andino-Amazónicas de Ecuador, Perú y Bolivia",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    leyenda = [
+        Patch(facecolor=COLORES_PAIS["Ecuador"], edgecolor="#555", label="Ecuador"),
+        Patch(facecolor=COLORES_PAIS["Perú"], edgecolor="#555", label="Perú"),
+        Patch(facecolor=COLORES_PAIS["Bolivia"], edgecolor="#555", label="Bolivia"),
+        Patch(facecolor="#C9B6D9", edgecolor="#555", alpha=0.7,
+              label="Subcuencas (color por polígono)"),
+        Line2D([0], [0], color="#2E86C1", linewidth=1.2, label="Ríos"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#D9534F",
+               markeredgecolor="white", markersize=7, label="Estaciones"),
+    ]
+
+    ax.legend(
+        handles=leyenda,
+        loc="lower left",
+        fontsize=7,
+        framealpha=0.92,
+    )
+
+    buffer = BytesIO()
+
+    fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
+
+    plt.close(fig)
+
+    return buffer.getvalue()
+
+
+# ============================================================
+# 7. ENCABEZADO Y PANEL LATERAL
+# ============================================================
+
+st.title(
+    "Modelamiento Hidrológico de las Cuencas "
+    "Andino-Amazónicas de Ecuador, Perú y Bolivia"
+)
+
+st.caption(
+    "Ecuador · Perú · Bolivia | "
+    "Estaciones, subcuencas y red hidrográfica"
+)
+
+st.sidebar.title("Opciones")
+
+ver_satelite = st.sidebar.checkbox(
+    "Google Satélite en el mapa de cuenca",
+    value=True
+)
+
+if st.sidebar.button("Recargar archivos", use_container_width=True):
+
     st.cache_data.clear()
+    st.cache_resource.clear()
     st.rerun()
 
 
 # ============================================================
-# 8. LEER CAPAS
+# 8. CARGAR DATOS
 # ============================================================
 
-with st.spinner(
-    "Leyendo archivos geoespaciales del repositorio..."
-):
+with st.spinner("Leyendo capas geográficas..."):
 
-    capas_sudamerica, errores_base = cargar_shapefiles(
-        archivos_sudamerica,
-        "Sudamérica"
-    )
+    capas_sudamerica, e1 = cargar_carpeta("sudamerica")
+    capas_subcuencas, e2 = cargar_carpeta("subcuencas")
+    capas_rios, e3 = cargar_carpeta("rios")
+    capas_puntos, e4 = cargar_carpeta("puntos")
 
-    capas_puntos, errores_puntos = cargar_shapefiles(
-        archivos_puntos,
-        "Puntos"
-    )
+errores = e1 + e2 + e3 + e4
 
-    capas_subcuencas, errores_gpkg = cargar_geopackages(
-        archivos_gpkg
-    )
+clave_sud = firma(capas_sudamerica)
+clave_sub = firma(capas_subcuencas)
+clave_rios = firma(capas_rios)
+clave_pts = firma(capas_puntos)
 
-errores = (
-    errores_base
-    + errores_puntos
-    + errores_gpkg
+paises_gdf = construir_paises(clave_sud, capas_sudamerica)
+
+estaciones = construir_estaciones(
+    clave_pts + "||" + clave_sud,
+    capas_puntos,
+    paises_gdf
 )
+
+estaciones_por_clave = {e["clave"]: e for e in estaciones}
 
 
 # ============================================================
 # 9. INDICADORES
 # ============================================================
 
-total_puntos = sum(
-    len(gdf)
-    for _, gdf in capas_puntos
-)
+conteo = {p: 0 for p in PAISES_LISTA}
+conteo[SIN_PAIS] = 0
 
-c1, c2, c3, c4 = st.columns(4)
+for e in estaciones:
+    conteo[e["pais"]] = conteo.get(e["pais"], 0) + 1
 
-c1.metric(
-    "Capas de Sudamérica",
-    len(capas_sudamerica)
-)
+m1, m2, m3, m4 = st.columns(4)
 
-c2.metric(
-    "Estaciones",
-    f"{total_puntos:,}"
-)
+m1.metric("Estaciones totales", len(estaciones))
+m2.metric("Ecuador", conteo["Ecuador"])
+m3.metric("Perú", conteo["Perú"])
+m4.metric("Bolivia", conteo["Bolivia"])
 
-c3.metric(
-    "Archivos GPKG",
-    len(archivos_gpkg)
-)
-
-c4.metric(
-    "Capas hidrográficas",
-    len(capas_subcuencas)
-)
+if paises_gdf.empty:
+    st.warning(
+        "No se pudo identificar la columna de países en el shape de "
+        "Sudamérica. Revisa que la carpeta 'sudamerica' tenga una "
+        "columna con los nombres de los países."
+    )
 
 
 # ============================================================
-# 10. VISOR GEoespacial
+# 10. MAPA GENERAL (ESTÁTICO)
 # ============================================================
 
-st.subheader("Visor geoespacial")
+st.subheader("Mapa general")
 
-todas = (
-    [gdf for _, gdf in capas_sudamerica]
-    + [gdf for _, gdf in capas_puntos]
-    + [gdf for _, gdf in capas_subcuencas]
-)
+with st.spinner("Generando mapa general..."):
 
-centro, bounds = calcular_extension(todas)
+    imagen = mapa_estatico(
+        clave_sud + "||" + clave_sub + "||" + clave_rios + "||" + clave_pts,
+        capas_sudamerica,
+        capas_subcuencas,
+        capas_rios,
+        estaciones,
+        paises_gdf,
+    )
 
-mapa = folium.Map(
-    location=centro,
-    zoom_start=5,
-    tiles=None,
-    control_scale=True,
-    prefer_canvas=True
-)
+st.image(imagen, use_container_width=True)
 
 
 # ============================================================
-# 11. MAPAS BASE
+# 11. SELECCIÓN DE PAÍS Y ESTACIÓN
 # ============================================================
 
-if ver_satelite:
+st.divider()
 
-    folium.TileLayer(
-        tiles=(
-            "https://mt1.google.com/vt/"
-            "lyrs=s&x={x}&y={y}&z={z}"
-        ),
-        attr="Google Satellite",
-        name="Google Satélite",
-        overlay=False,
-        show=True,
-        max_zoom=20
-    ).add_to(mapa)
+st.subheader("Explorar cuenca por estación")
 
+opciones_pais = list(PAISES_LISTA)
 
-folium.TileLayer(
-    "OpenStreetMap",
-    name="OpenStreetMap",
-    overlay=False,
-    show=not ver_satelite
-).add_to(mapa)
+if conteo.get(SIN_PAIS, 0) > 0:
+    opciones_pais.append(SIN_PAIS)
 
+col_a, col_b = st.columns(2)
 
-# ============================================================
-# 12. CAPA SUDAMERICA
-# ============================================================
+with col_a:
 
-if ver_sudamerica:
+    pais_sel = st.selectbox(
+        "1. Selecciona el país",
+        opciones_pais,
+        index=None,
+        placeholder="Ecuador, Perú o Bolivia",
+        key="pais_sel",
+    )
 
-    for nombre, gdf in capas_sudamerica:
+estacion_sel = None
 
-        agregar_poligono(
-            mapa,
-            gdf,
-            f"Sudamérica - {nombre}",
-            "#263746"
+with col_b:
+
+    if pais_sel is None:
+
+        st.selectbox(
+            "2. Selecciona la estación",
+            [],
+            index=None,
+            placeholder="Primero elige un país",
+            disabled=True,
+            key="estacion_vacia",
         )
-
-
-# ============================================================
-# 13. CUENCAS Y SUBCUENCAS
-# ============================================================
-
-if ver_cuencas:
-
-    for nombre, gdf in capas_subcuencas:
-
-        agregar_poligono(
-            mapa,
-            gdf,
-            nombre,
-            color_estable(nombre)
-        )
-
-
-# ============================================================
-# 14. ESTACIONES
-# ============================================================
-
-if ver_puntos:
-
-    for nombre, gdf in capas_puntos:
-
-        agregar_puntos(
-            mapa,
-            gdf,
-            nombre
-        )
-
-
-# ============================================================
-# 15. CONTROLES DEL MAPA
-# ============================================================
-
-Fullscreen(
-    position="topleft"
-).add_to(mapa)
-
-MousePosition(
-    position="bottomright",
-    prefix="Coordenadas",
-    separator=" | ",
-    num_digits=5
-).add_to(mapa)
-
-MiniMap(
-    toggle_display=True,
-    minimized=True
-).add_to(mapa)
-
-folium.LayerControl(
-    collapsed=False
-).add_to(mapa)
-
-if bounds:
-
-    mapa.fit_bounds(
-        bounds,
-        padding=(20, 20)
-    )
-
-
-# ============================================================
-# 16. MOSTRAR MAPA
-# ============================================================
-
-try:
-
-    st_folium(
-        mapa,
-        use_container_width=True,
-        height=690,
-        returned_objects=[],
-        key="visor_hidrologico_bid"
-    )
-
-except Exception as error:
-
-    st.error(
-        f"Error al visualizar el mapa: {error}"
-    )
-
-
-# ============================================================
-# 17. LEYENDA
-# ============================================================
-
-st.subheader("Leyenda de capas")
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    st.markdown("**Límite geográfico**")
-
-    st.markdown(
-        '<span style="display:inline-block;width:14px;'
-        'height:14px;background:#263746;margin-right:8px;"></span>'
-        'Sudamérica',
-        unsafe_allow_html=True
-    )
-
-    st.markdown("**Estaciones hidrológicas**")
-
-    st.markdown(
-        '<span style="display:inline-block;width:12px;'
-        'height:12px;border-radius:50%;background:#e31a1c;'
-        'margin-right:8px;"></span>'
-        'Puntos de estaciones',
-        unsafe_allow_html=True
-    )
-
-
-with col2:
-
-    st.markdown("**Cuencas y subcuencas**")
-
-    for nombre, _ in capas_subcuencas:
-
-        color = color_estable(nombre)
-
-        st.markdown(
-            f'<span style="display:inline-block;width:14px;'
-            f'height:14px;background:{color};'
-            f'margin-right:8px;"></span>{nombre}',
-            unsafe_allow_html=True
-        )
-
-
-# ============================================================
-# 18. DIAGNOSTICO
-# ============================================================
-
-with st.expander(
-    "Diagnóstico de lectura de archivos",
-    expanded=bool(errores)
-):
-
-    st.write(
-        f"Shapefiles de Sudamérica cargados: "
-        f"{len(capas_sudamerica)}"
-    )
-
-    st.write(
-        f"Shapefiles de puntos cargados: "
-        f"{len(capas_puntos)}"
-    )
-
-    st.write(
-        f"Capas internas de GPKG cargadas: "
-        f"{len(capas_subcuencas)}"
-    )
-
-    if errores:
-
-        st.warning(
-            f"Se encontraron {len(errores)} errores."
-        )
-
-        for error in errores:
-            st.code(error)
 
     else:
 
-        st.success(
-            "Todos los archivos detectados "
-            "se leyeron correctamente."
+        lista = sorted(
+            [e for e in estaciones if e["pais"] == pais_sel],
+            key=lambda e: e["nombre"].lower()
         )
 
+        claves = [e["clave"] for e in lista]
+
+        estacion_sel = st.selectbox(
+            f"2. Selecciona la estación ({len(lista)} en {pais_sel})",
+            claves,
+            index=None,
+            placeholder="Elige una estación",
+            format_func=lambda k: (
+                f"{estaciones_por_clave[k]['codigo']} — "
+                f"{estaciones_por_clave[k]['nombre']}"
+            ),
+            key=f"estacion_{pais_sel}",
+        )
+
+if pais_sel is None:
+    st.info("Selecciona un país para ver sus estaciones.")
+
+elif estacion_sel is None:
+    st.info("Selecciona una estación para cargar su cuenca.")
+
 
 # ============================================================
-# 19. PIE DE PAGINA
+# 12. CUENCA DE LA ESTACIÓN: MAPA (IZQ.) + CARACTERÍSTICAS (DER.)
 # ============================================================
 
-st.markdown(
-    """
-    <hr>
+if estacion_sel is not None:
 
-    <div style="
-        text-align:center;
-        color:#64748b;
-        font-size:12px;">
+    try:
 
-        Modelamiento Hidrológico de las Cuencas
-        Andino-Amazónicas · Ecuador · Perú · Bolivia
+        est = estaciones_por_clave[estacion_sel]
 
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+        pasos = []
+
+        pasos.append(
+            f"Estación: {est['codigo']} — {est['nombre']} "
+            f"({est['lat']:.5f}, {est['lon']:.5f})"
+        )
+
+        # --- Buscar subcuenca de ESTA estación ---
+        cuenca, metodo, dist_borde = buscar_cuenca_estacion(
+            est,
+            capas_subcuencas
+        )
+
+        poligono = obtener_poligono(cuenca, capas_subcuencas)
+
+        if poligono is not None:
+
+            pasos.append(
+                f"Subcuenca asignada: {nombre_corto(cuenca[0])} "
+                f"(fila {cuenca[1]})"
+            )
+            pasos.append(f"Método: {metodo}")
+
+            if dist_borde is not None:
+                pasos.append(
+                    f"Distancia estación → borde de la cuenca: "
+                    f"{dist_borde * 111:.1f} km"
+                )
+
+        else:
+            pasos.append("No se encontró subcuenca para la estación.")
+
+        # --- Área ---
+        area_km2 = (
+            calcular_area_km2(poligono)
+            if poligono is not None
+            else None
+        )
+
+        # --- Ríos de la cuenca ---
+        lista_rios = []
+
+        if poligono is not None:
+            lista_rios = rios_de_cuenca(poligono, capas_rios)
+
+        pasos.append(
+            f"Capas de ríos con tramos en la cuenca: {len(lista_rios)}"
+        )
+
+        col_mapa, col_info = st.columns([3, 2])
+
+        # ---------------- MAPA ----------------
+
+        with col_mapa:
+
+            mapa = folium.Map(
+                location=[est["lat"], est["lon"]],
+                zoom_start=10,
+                tiles=None,
+                control_scale=True
+            )
+
+            folium.TileLayer(
+                tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+                attr="Google Satellite",
+                name="Google Satélite",
+                overlay=False,
+                show=ver_satelite,
+                max_zoom=20
+            ).add_to(mapa)
+
+            folium.TileLayer(
+                "OpenStreetMap",
+                name="OpenStreetMap",
+                overlay=False,
+                show=not ver_satelite
+            ).add_to(mapa)
+
+            if poligono is not None:
+
+                texto_area = (
+                    f"Área: {area_km2:,.2f} km²"
+                    if area_km2 is not None
+                    else "Cuenca"
+                )
+
+                feature = {
+                    "type": "Feature",
+                    "geometry": poligono.__geo_interface__,
+                    "properties": {},
+                }
+
+                grupo_cuenca = folium.FeatureGroup(
+                    name="Cuenca",
+                    show=True
+                )
+
+                # Halo blanco.
+                folium.GeoJson(
+                    feature,
+                    style_function=lambda f: {
+                        "color": COLOR_BORDE_ACTIVO,
+                        "weight": 9,
+                        "opacity": 0.35,
+                        "fillOpacity": 0,
+                    },
+                ).add_to(grupo_cuenca)
+
+                # Relleno dorado.
+                folium.GeoJson(
+                    feature,
+                    style_function=lambda f: {
+                        "color": COLOR_BORDE_ACTIVO,
+                        "weight": 3,
+                        "opacity": 1,
+                        "fillColor": COLOR_CUENCA_ACTIVA,
+                        "fillOpacity": 0.40,
+                    },
+                    tooltip=texto_area,
+                ).add_to(grupo_cuenca)
+
+                grupo_cuenca.add_to(mapa)
+
+                # Ríos dentro de la cuenca.
+                grupo_rios = folium.FeatureGroup(
+                    name="Ríos de la cuenca",
+                    show=True
+                )
+
+                for geojson in lista_rios:
+
+                    folium.GeoJson(
+                        geojson,
+                        style_function=lambda f: {
+                            "color": COLOR_RIO_ACTIVO,
+                            "weight": 3,
+                            "opacity": 1,
+                        },
+                    ).add_to(grupo_rios)
+
+                grupo_rios.add_to(mapa)
+
+                bx1, by1, bx2, by2 = poligono.bounds
+
+                mapa.fit_bounds(
+                    [[by1, bx1], [by2, bx2]],
+                    padding=(30, 30)
+                )
+
+            # Estación seleccionada.
+            folium.CircleMarker(
+                location=[est["lat"], est["lon"]],
+                radius=8,
+                color="#FFFFFF",
+                weight=2,
+                fill=True,
+                fill_color=COLOR_ESTACION_ACTIVA,
+                fill_opacity=1,
+                tooltip=f"{est['codigo']} — {est['nombre']}",
+            ).add_to(mapa)
+
+            Fullscreen(position="topleft").add_to(mapa)
+
+            folium.LayerControl(collapsed=True).add_to(mapa)
+
+            html_mapa = mapa.get_root().render()
+
+            components.html(html_mapa, height=620, scrolling=False)
+
+        # ---------------- CARACTERÍSTICAS ----------------
+
+        with col_info:
+
+            st.markdown("#### Características de la cuenca")
+
+            with st.container(border=True):
+
+                st.markdown(f"**País**  \n{est['pais']}")
+                st.markdown(f"**Código de la estación**  \n{est['codigo']}")
+                st.markdown(f"**Nombre de la estación**  \n{est['nombre']}")
+
+                if area_km2 is not None:
+                    st.metric("Área de la cuenca", f"{area_km2:,.2f} km²")
+                else:
+                    st.warning(
+                        "No se encontró una subcuenca para esta estación."
+                    )
+
+                st.caption(
+                    f"Coordenadas: {est['lat']:.5f}, {est['lon']:.5f}"
+                )
+
+            # Avisos de coherencia.
+            if poligono is not None:
+
+                if metodo != "Por código de estación":
+                    st.warning(
+                        "No hay un archivo de subcuenca con el código "
+                        f"{est['codigo']}. La cuenca se asignó por "
+                        "ubicación; verifica que sea correcta."
+                    )
+
+                if (
+                    dist_borde is not None
+                    and dist_borde * 111 > TOL_AVISO_KM
+                ):
+                    st.warning(
+                        "La estación no está sobre el borde (salida) de "
+                        "esta cuenca. Revisa si el archivo de subcuenca "
+                        "corresponde a la estación."
+                    )
+
+            with st.expander("Detalle del proceso", expanded=True):
+
+                for p in pasos:
+                    st.write(p)
+
+    except Exception as exc:
+
+        st.error("Ocurrió un error al cargar la cuenca de esta estación:")
+        st.exception(exc)
+
+
+# ============================================================
+# 13. VERIFICACIÓN DE TODAS LAS ESTACIONES
+# ============================================================
+
+st.divider()
+
+with st.expander("Verificar asociación estación → cuenca"):
+
+    st.caption(
+        "Muestra a qué subcuenca se asigna cada estación. "
+        "Las filas con ⚠️ se asignaron por ubicación o quedan lejos "
+        "de la salida de la cuenca: conviene revisarlas."
+    )
+
+    if st.checkbox("Calcular tabla de verificación"):
+
+        filas = []
+
+        for e in sorted(estaciones, key=lambda x: x["codigo"]):
+
+            try:
+
+                cuenca_e, metodo_e, dist_e = buscar_cuenca_estacion(
+                    e,
+                    capas_subcuencas
+                )
+
+            except Exception as exc:
+
+                cuenca_e, metodo_e, dist_e = None, f"Error: {exc}", None
+
+            dist_km = (
+                round(dist_e * 111, 1)
+                if dist_e is not None
+                else None
+            )
+
+            revisar = (
+                cuenca_e is None
+                or metodo_e != "Por código de estación"
+                or (dist_km is not None and dist_km > TOL_AVISO_KM)
+            )
+
+            filas.append(
+                {
+                    "Revisar": "⚠️" if revisar else "✔",
+                    "Código estación": e["codigo"],
+                    "Nombre": e["nombre"],
+                    "País": e["pais"],
+                    "Subcuenca asignada": (
+                        nombre_corto(cuenca_e[0])
+                        if cuenca_e is not None
+                        else "—"
+                    ),
+                    "Método": metodo_e,
+                    "Dist. al borde (km)": dist_km,
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(filas),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("Archivos de subcuencas detectados"):
+
+            st.write(
+                ", ".join(
+                    nombre_corto(n) for n, _ in capas_subcuencas
+                )
+                or "Ninguno"
+            )
+
+
+# ============================================================
+# 14. DIAGNÓSTICO
+# ============================================================
+
+if errores:
+
+    with st.expander(f"Errores de lectura ({len(errores)})"):
+
+        for error in errores:
+            st.write(error)
+
+st.caption("Visor Hidrológico BID | Ecuador · Perú · Bolivia")
