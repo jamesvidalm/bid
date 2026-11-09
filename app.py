@@ -863,27 +863,100 @@ def mapa_estatico(clave, _paises, _capas_sub, _capas_rios):
     fig, ax = plt.subplots(figsize=(9, 9))
     ax.set_facecolor("#EAF2F8")
 
-    # Subcuencas: bordes diferenciados y relleno transparente.
-    for i, (_, gdf) in enumerate(_capas_sub):
-        if gdf is None or gdf.empty:
-            continue
-        try:
-            color = COLORES_CUENCAS[i % len(COLORES_CUENCAS)]
-            gdf.plot(
-                ax=ax, facecolor="none", edgecolor=color,
-                linewidth=0.45, alpha=0.9
-            )
-        except Exception:
-            continue
+    # Área habilitada para cuencas y ríos: únicamente Ecuador y Perú.
+    # Bolivia conserva su límite nacional y sus estaciones, pero no muestra
+    # todavía subcuencas ni red hidrográfica en el mapa general.
+    area_habilitada = None
 
-    # Red de ríos.
-    for _, gdf in _capas_rios:
-        if gdf is None or gdf.empty:
-            continue
-        try:
-            gdf.plot(ax=ax, color="#168AAD", linewidth=0.35, alpha=0.85)
-        except Exception:
-            continue
+    if _paises is not None and not _paises.empty:
+        paises_habilitados = _paises[
+            _paises["pais"].isin(["Ecuador", "Perú"])
+        ]
+
+        if not paises_habilitados.empty:
+            try:
+                area_habilitada = paises_habilitados.geometry.union_all()
+            except Exception:
+                area_habilitada = paises_habilitados.geometry.unary_union
+
+    # Subcuencas: solo geometrías dentro de Ecuador y Perú.
+    # No se dibujan las subcuencas de Bolivia.
+    if area_habilitada is not None:
+        indice_color = 0
+
+        for _, gdf in _capas_sub:
+            if gdf is None or gdf.empty:
+                continue
+
+            try:
+                capa = gdf
+                if capa.crs is None:
+                    capa = capa.set_crs("EPSG:4326")
+                elif capa.crs.to_string() != "EPSG:4326":
+                    capa = capa.to_crs("EPSG:4326")
+
+                geometrias = capa.geometry[
+                    capa.geometry.notna() & ~capa.geometry.is_empty
+                ]
+
+                recortadas = geometrias.intersection(area_habilitada)
+                recortadas = recortadas[
+                    recortadas.notna() & ~recortadas.is_empty
+                ]
+
+                if not recortadas.empty:
+                    color = COLORES_CUENCAS[
+                        indice_color % len(COLORES_CUENCAS)
+                    ]
+                    gpd.GeoSeries(
+                        recortadas,
+                        crs="EPSG:4326"
+                    ).plot(
+                        ax=ax,
+                        facecolor="none",
+                        edgecolor=color,
+                        linewidth=0.45,
+                        alpha=0.9,
+                    )
+                    indice_color += 1
+            except Exception:
+                continue
+
+    # Red de ríos: solo los tramos ubicados en Ecuador y Perú.
+    # Bolivia se mostrará únicamente con sus límites y puntos de estación.
+    if area_habilitada is not None:
+        for _, gdf in _capas_rios:
+            if gdf is None or gdf.empty:
+                continue
+
+            try:
+                capa = gdf
+                if capa.crs is None:
+                    capa = capa.set_crs("EPSG:4326")
+                elif capa.crs.to_string() != "EPSG:4326":
+                    capa = capa.to_crs("EPSG:4326")
+
+                geometrias = capa.geometry[
+                    capa.geometry.notna() & ~capa.geometry.is_empty
+                ]
+
+                recortadas = geometrias.intersection(area_habilitada)
+                recortadas = recortadas[
+                    recortadas.notna() & ~recortadas.is_empty
+                ]
+
+                if not recortadas.empty:
+                    gpd.GeoSeries(
+                        recortadas,
+                        crs="EPSG:4326"
+                    ).plot(
+                        ax=ax,
+                        color="#168AAD",
+                        linewidth=0.35,
+                        alpha=0.85,
+                    )
+            except Exception:
+                continue
 
     # Límites de países, cada uno con un color distinto.
     if _paises is not None and not _paises.empty:
@@ -1063,6 +1136,17 @@ with col_b:
             key="estacion_vacia",
         )
 
+    elif pais_sel == "Bolivia":
+
+        st.selectbox(
+            "2. Selecciona la estación",
+            [],
+            index=None,
+            placeholder="Disponible en una siguiente etapa",
+            disabled=True,
+            key="estacion_bolivia",
+        )
+
     else:
 
         lista = sorted(
@@ -1086,6 +1170,13 @@ with col_b:
 
 if pais_sel is None:
     st.info("Selecciona un país para ver sus estaciones.")
+
+elif pais_sel == "Bolivia":
+    st.info(
+        "En la siguiente etapa se mostrarán las cuencas delimitadas de "
+        "Bolivia y su red hidrográfica. Esta funcionalidad aún se encuentra "
+        "en desarrollo."
+    )
 
 elif estacion_sel is None:
     st.info("Selecciona una estación para cargar su cuenca.")
