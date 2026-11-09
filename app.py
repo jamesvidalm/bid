@@ -1004,13 +1004,6 @@ if paises_gdf.empty:
         "columna con los nombres de los países."
     )
 
-if not capas_rios_sub:
-    st.warning(
-        "No se encontraron archivos en la carpeta 'rios_subcuencas'. "
-        "En el mapa de cuenca se usarán los ríos generales."
-    )
-
-
 # ============================================================
 # 10. MAPA GENERAL (ESTÁTICO)
 # ============================================================
